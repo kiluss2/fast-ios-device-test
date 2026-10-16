@@ -21,6 +21,24 @@ Fastest repeat when the cached app definitely matches current source:
 scripts/fast_ui.py /absolute/path/to/task-flow.json --reuse-app
 ```
 
+Build a new flow step by step on the live app instead of rerunning the whole flow to find
+labels (`fastSimulatorTest` takes the same verbs):
+
+```bash
+scripts/fast_ui.py start /abs/draft-flow.json      # build if needed, fresh install, launch; prints labels
+scripts/fast_ui.py do '{"type":"tap_label","label":"Settings"}'   # one action or a JSON array
+scripts/fast_ui.py labels                           # what is on screen now (--settle N to wait)
+scripts/fast_ui.py save [/abs/flow.json]            # write the recorded actions, then verify with a full run
+```
+
+`start` needs only the draft's `app` and `setup`. Each `do` runs through the same action code
+as a full run and prints `OK steps=N … labels=[…]` or `FAIL step=N error=…`; failed steps,
+`dump`, `screenshot` and `labels` are not recorded. `save` adds `"settle": true` to every
+`scroll_to` / `swipe` that has no `settle` of its own (a replay has no think time between
+steps) and runs the saved flow once from a fresh install (`--no-verify` skips that).
+`--udid` picks a session when several simulators have one. State a session changes
+(appearance, location, …) is not undone until the next full run on that simulator.
+
 Refresh the cached app once before fanning flows out to several simulators:
 
 ```bash
@@ -33,6 +51,30 @@ concurrent builds. Flows running in parallel on different simulators should
 all pass `--reuse-app`. Artifacts land in
 `build/fast-ui/<task>/<timestamp>-<udid8>-<pid>/`, so parallel runs never
 overwrite each other.
+
+One run per simulator: a run holds a lock on its UDID, and a second run (or a session `do`)
+on the same simulator fails at once with `simulator busy: … is running <flow> (pid …)`
+(`FAST_UI_LOCK_WAIT=<seconds>` waits instead). Every change a run makes to the simulator is
+journalled beside that lock and undone in teardown: seeded preferences, the app (terminated),
+appearance, content size, location, status bar, permissions granted with `set_permission`.
+SIGTERM / SIGHUP / Ctrl-C still run teardown and write `metrics.json` with
+`status=interrupted` (exit 130). A run killed with SIGKILL leaves the journal dirty; the next
+run on that simulator prints `WARN dirty=1 … repaired …` and undoes it before starting.
+The simulator keychain survives an uninstall: a fresh install resets it only on simulators
+named `fastui-…` / `fastwf-…`, or when `setup.reset_keychain` is true.
+
+### SwiftLint and other build failures
+
+Test builds skip SwiftLint by default: `xcodebuild` runs with a no-op `swiftlint` shim
+(`scripts/shims/`) first on `PATH`, so a run-script phase that calls plain `swiftlint`
+finishes at once and its violations cannot fail the build (measured: a no-op build 6–9 s → 2–3 s).
+The engine prints `lint=shimmed` or `lint=not-shimmable (<reason>)`: a phase that runs
+swiftlint by path (`${PODS_ROOT}/SwiftLint/swiftlint`, `/opt/homebrew/bin/swiftlint`),
+through `mint run`, after prepending to `PATH`, or the SwiftLint build-tool plugin is not
+bypassed; the build cache (`build_inputs` fingerprint) still skips those builds when nothing
+changed. `"skip_lint": false` in `app`, or `FAST_UI_SKIP_LINT=0`, lints as usual.
+A failed build names the failing phase and the first `error:` line, and the full log is
+written to `<derived_data>/.fastui-build.log`.
 
 `--record` captures the simulator screen (`simctl io recordVideo`) and re-encodes it at
 review quality: H.264 MP4, long side 960 px, ~800 kbit/s, so a 20 s clip is 0.5–2 MB
@@ -99,6 +141,82 @@ Supported actions:
   "<bundle id>"`; `launch` takes `launch_arguments`.
 - `open_url`: `simctl openurl` with `url` (deep links, universal links).
 
+### Gestures, keyboard, controls, assertions and device state
+
+A gesture target is a selector (the same keys as `wait`) on the action itself, `x`/`y`, or
+for `drag` a `from`/`to` that is either a selector mapping or an `[x, y]` point. Where an
+engine cannot do an action it fails with a message naming the one that can. Columns: Sim =
+`fastSimulatorTest`, iPhone = `fastDeviceTest`.
+
+| Action | Keys | Sim | iPhone |
+|---|---|---|---|
+| `long_press` | target, `duration` (1.0 s) | ✓ | ✓ |
+| `double_tap` | target | ✓ | ✓ |
+| `two_finger_tap` | optional selector (default: whole app) | – | ✓ |
+| `drag` | `from`, `to`, `hold` (0.6 s still before moving: reorder, drag-and-drop, Home Screen icons), `duration` (0.8 s) | ✓ | ✓ |
+| `pinch` | optional selector, `scale` (>1 zooms in), `velocity` | – | ✓ |
+| `rotate_gesture` | optional selector, `degrees` (90) | – | ✓ |
+| `swipe` on an element | selector + `direction`: the swipe stays inside that frame (swipe-to-delete a row) | ✓ | ✓ |
+| `back` | swipe from the left edge | ✓ | ✓ |
+| `edge_swipe` | `edge`: `left`/`right`/`top` (Notification Center)/`bottom` (home indicator) | ✓ | ✓ |
+| `pull_to_refresh` | optional selector of the list | ✓ | ✓ |
+| `type_text` | `text`; optional selector taps the field first; `clear: true` empties it first | ✓ | ✓ |
+| `clear_text` | optional field selector (else the focused field) | ✓ | ✓ |
+| `press_key` | `key`: `return`/`enter`, `delete`/`backspace`, `tab`, `space`, `escape`; Sim also `up`/`down`/`left`/`right`; `count` | ✓ | ✓ (no arrows) |
+| `dismiss_keyboard` | optional `button` (a toolbar "Done"); else Return, repeated while the keyboard stays | ✓ | ✓ |
+| `set_switch` | selector, `on`: true/false; taps only when needed, then waits for the new value; result `toggled` | ✓ | ✓ |
+| `set_slider` | selector, `percent` 0–100, `tolerance` (2) | ✓ | ✓ |
+| `set_picker` | selector, `option` (row text) or `index` (row number) | ✓ | ✓ (`option` only) |
+| `tap_alert` | `button`: a button inside a system or app alert, waited for; `system: true` only a system alert; `optional: true` passes (`skipped`) when no alert came | ✓ | ✓ |
+| `assert_value` | selector, `attribute` (`value`/`label`), `equals` / `not_equals` / `contains` / `matches` (regex); polls until `timeout` | ✓ | ✓ |
+| `assert_count` | selector, `count` / `min` / `max`; a box counts once; result `count` | ✓ | ✓ |
+| `press_button` | `button`: `home`; Sim also `lock`, `side`, `siri`, `apple_pay`; iPhone also `volume_up`, `volume_down`, `action`, `camera` | ✓ | ✓ |
+| `activate` | brings the app (or `app`) to the front without relaunching | ✓ | ✓ |
+| `set_orientation` | `portrait`, `portrait_upside_down`, `landscape_left`, `landscape_right` | – | ✓ |
+| `set_appearance` | `light` / `dark`, mid-flow | ✓ | ✓ |
+| `set_location` | `latitude`, `longitude`, or `clear: true` | ✓ | ✓ (iOS 16.4+) |
+| `set_permission` | `service` (`photos`, `camera`, `location`, `contacts`, `microphone`, …), `action` (required) `grant`/`revoke`/`reset` | ✓ | `reset` only |
+| `push_notification` | `title`/`body`, or a whole APNs `payload`; `app` | ✓ | – |
+| `status_bar` | `time`, `battery_level`, `battery_state`, `wifi_bars`, `cellular_bars`, `data_network`, `operator_name`, …, or `clear: true` | ✓ | – |
+| `set_clipboard` / `assert_clipboard` | `text` / `equals`, `contains`, … | ✓ | ✓ |
+| `open_url` | `url` | ✓ | ✓ (iOS 16.4+) |
+
+Selectors also take `enabled: false` to find a disabled control (`assert_count` with
+`"enabled": false, "max": 0` proves nothing on screen is disabled); `dump` marks disabled nodes.
+
+What the Simulator needs, measured on Xcode 27.0 with AXe 1.8 and iOS 27:
+
+- A switch flips only for a touch held ~0.3 s; AXe's taps, `--tap-style physical` included,
+  leave it alone. `set_switch` does this. AXe reports a switch as `CheckBox` on iOS 27 (it
+  accepts `Switch` too); a scroll view's scroll bars are `Slider`s, so `set_slider` skips them.
+- The back gesture, row swipe actions and edge swipes ignore `axe swipe` (a fling); the engine
+  sends them as `axe drag`, every touch move. Plain `swipe` without a selector is still a fling,
+  so scrolling keeps its momentum.
+- A key is dropped when AXe sends it right as a session opens or closes, like a tap: keys and
+  typed text go out in one `axe batch` with a sleep before and after (a lone `axe type` lost
+  the last character). iOS still applies smart punctuation: `'` and `"` arrive curly, and two
+  spaces become ". ".
+- The status bar may be missing from the AX tree: prove a `status_bar` override with a
+  `screenshot` (simctl shows `9:41` as `09:41`).
+- AX reports an empty text field's value as its placeholder. A SwiftUI `Slider` reports a
+  fraction (`0.5`), a UIKit one a percentage (`50%`); a SwiftUI wheel `Picker` is a `Slider`
+  whose value is the row index, so pick by `index` there, by `option` on a UIKit picker.
+- A system alert that appears while the flow is typing swallows the tap that focused the field.
+  When the app asks for a permission at launch, answer it first with
+  `{"type": "tap_alert", "button": "Allow", "system": true, "optional": true}`: iOS drops a
+  permission request made in the first 40–60 s after a boot under load, so the prompt may
+  never come and a required `tap_alert` would fail for nothing.
+- SwiftUI `.draggable` / `.dropDestination` never lifts on the Simulator (a 1.5 s hold
+  included); drag-and-drop between views needs the iPhone. Home Screen icons do move with
+  `drag`.
+- `push_notification` fails until the app has notification permission; the error says so.
+- `simctl pbcopy` exits 0 but leaves an iOS 27 simulator's pasteboard empty, so
+  `set_clipboard` fails there with that message; use an Xcode 26 simulator or the iPhone.
+- `double_tap` sends both taps in one AXe session, which is a double tap only while AXe
+  delivers a touch in well under 0.3 s. On a slow Simulator (measured 0.73 s per touch event
+  right after a CoreSimulator restart) the two taps arrive as two single taps; prove double
+  taps on the iPhone, where XCUITest's `doubleTap()` has no such gap.
+
 Any tap or swipe may carry `"settle": true` (or a number of seconds, default 2.5): after the
 gesture the engine polls until two consecutive hierarchies match, then continues. It costs the
 whole timeout on a screen that never stops animating, so it is opt-in per action;
@@ -130,7 +248,11 @@ key when the app sets identifiers; `tap_label` takes every key too. Missing or a
 required selectors fail closed. Optional system prompts are declared under
 `setup.optional_permission_labels`. The runner dismisses them from the same UI
 hierarchy polling loop used by selectors, so prompts that appear late do not
-need fixed sleeps or a separate retry loop.
+need fixed sleeps or a separate retry loop. Only a button inside a system alert is
+auto-tapped; an in-app button with the same label is the app's own UI and is left alone.
+A system alert the flow saw but never dismissed is reported on the PASS line as
+`WARN system_alert_seen=…` (`setup.system_alert: "fail"` turns that into a FAIL), and
+`scroll_to` fails at once when a system alert covers the app instead of swiping it.
 
 System sheets that block a Simulator flow and their dismiss labels: notification
 permission (`Allow` / `Don’t Allow`), App Tracking Transparency (`Allow Tracking`
@@ -306,6 +428,10 @@ not grow at `accessibility-*` sizes as a product finding.
 - `FAST_VIDEO_LONG_SIDE` / `FAST_VIDEO_KBPS`: review-quality re-encode of recordings
   (960 / 800); `FAST_VIDEO_LONG_SIDE=0` keeps the original clip.
 - `FAST_UI_KEEP_DAYS`: prune age for that root; `0` disables pruning.
+- `FAST_UI_SKIP_LINT`: `0` lets SwiftLint run in test builds (default: skipped through the shim).
+- `FAST_UI_LOCK_WAIT`: seconds a run waits for a busy simulator (0: fail at once).
+- `FAST_UI_LOCK_DIR`: where the per-simulator locks and journals live
+  (`~/Library/Caches/fast-ui/locks`).
 - `FAST_DEVICE_ROOT`: artifacts root for `fastDeviceTest`.
 - `FAST_DEVICE_PROFILE`: provisioning profile UUID or path for the device runner.
 - `FAST_DEVICE_DEVELOPER_DIR`: Xcode to build/run the device runner with.

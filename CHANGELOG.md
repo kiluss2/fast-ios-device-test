@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+### Faster to prepare, safer to reuse a simulator
+
+Found and measured with a debate-and-experiment pass on the fixture app (load 20–390 on a
+shared Mac; ratios from interleaved runs):
+
+- **`start` / `do` / `labels` / `save`:** build a flow on the live app one action at a time,
+  then save it and verify it with one fresh-install run. Exploring a screen two steps deep
+  went from 49 s and 5 flow rewrites (rerun + `dump`) to 15 s and one write.
+- **SwiftLint skipped in test builds** through a no-op `swiftlint` shim on `PATH` (no-op
+  build 6–9 s → 2–3 s; a lint error no longer fails the test build). `lint=not-shimmable`
+  names phases the shim cannot reach; `"skip_lint": false` / `FAST_UI_SKIP_LINT=0` lints.
+- **Build failures say why:** the failing phase and first `error:` line (they were read from
+  stderr while `-quiet` prints them on stdout), full log in `<derived_data>/.fastui-build.log`.
+- **No state left for the next run:** a per-simulator lock (`simulator busy`), a journal of
+  what the run changed, undone in teardown and on SIGTERM / SIGHUP / Ctrl-C (`status=interrupted`),
+  and repaired by the next run after a SIGKILL (`WARN dirty=1`). Appearance changed by
+  `set_appearance`, status bar overrides, location and granted permissions no longer leak
+  (a following flow used to PASS wrongly in dark mode). The app is terminated at the end, and
+  relaunched with `--terminate-running-process` when `fresh_install` is false.
+  Keychain reset on fresh install for `fastui-…` simulators or `setup.reset_keychain`.
+- **System alerts:** `optional_permission_labels` taps only buttons inside a system alert,
+  never an in-app button with the same label; `tap_alert` takes `system` and `optional`;
+  an alert left on screen is reported (`WARN system_alert_seen`, `setup.system_alert: "fail"`);
+  `scroll_to` stops at once when a system alert covers the app.
+
+### Every interaction a real UI test needs
+
+Flows could tap, swipe, type and wait. They can now drive the whole surface of an app, with the
+same action names on Simulator and iPhone (table in `references/usage.md`):
+
+- **Gestures:** `long_press`, `double_tap`, `drag` (hold, then move: reorder, Home Screen
+  icons, drag-and-drop), `swipe` inside an element (swipe-to-delete), `back`, `edge_swipe`,
+  `pull_to_refresh`; on the iPhone `pinch`, `rotate_gesture`, `two_finger_tap`.
+- **Keyboard:** `type_text` into a named field with `clear: true`, `clear_text`, `press_key`,
+  `dismiss_keyboard`.
+- **Controls:** `set_switch` (taps only when needed and waits for the new value), `set_slider`,
+  `set_picker`, `tap_alert` (system or app alert).
+- **Assertions:** `assert_value` (`equals` / `not_equals` / `contains` / `matches` on a value or
+  label, polled), `assert_count`, and the selector key `enabled`.
+- **Device state:** `press_button`, `activate`, `set_appearance`, `set_location`,
+  `set_permission`, `set_clipboard` / `assert_clipboard`; Simulator `push_notification` and
+  `status_bar`; iPhone `set_orientation`, `open_url`.
+
+Measured on Xcode 27.0 / iOS 27 and built into the Simulator engine: a switch flips only for a
+~0.3 s touch; the back gesture, row swipe actions and edge swipes need `axe drag`, not `axe
+swipe`; keys are dropped unless sent inside an `axe batch` with a sleep on both sides; AXe sends
+numeric values as numbers (row 0 of a wheel is `0`, not empty).
+
+On the iPhone (checked on iOS 26.6.1): `open_url` uses the system handler instead of handing the
+URL to the current app; the clipboard is read and written with the runner briefly in front
+(iOS drops background access); an XCTest gesture failure is now a step FAIL instead of ending
+the persistent runner; search fields are `SearchField` and match `TextField`; `dump` lists
+unlabelled nodes that carry an identifier.
+
+### Fixed
+
+- Swipes by `direction` measured the screen as the largest frame in the tree, which in a long
+  list is the scroll content (y −1580); they now use the application's frame.
+
 ## 1.3.0 — 2026-10-13
 
 ### The iPhone screen can be recorded

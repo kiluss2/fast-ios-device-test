@@ -1,0 +1,6 @@
+#!/bin/sh
+# fastSimulatorTest puts this directory first on PATH for test builds so a
+# `swiftlint` run-script phase that resolves the tool through PATH is a no-op.
+# Set "skip_lint": false in the flow app block (or FAST_UI_SKIP_LINT=0) to lint.
+echo "note: swiftlint skipped by fastSimulatorTest (skip_lint)"
+exit 0

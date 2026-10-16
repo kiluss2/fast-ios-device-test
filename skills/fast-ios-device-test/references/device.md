@@ -23,9 +23,45 @@ re-signs it with an existing development profile, and runs the flow on the devic
   Shortcuts or SpringBoard from that step on; `activate` / `launch` / `terminate`
   act on the current app. Permission alerts are looked up on SpringBoard.
 - Supported actions: `wait`, `wait_absent`, `assert_absent`, `tap_label`,
-  `tap_first`, `tap_nearest`, `tap_point`, `swipe` (points or `direction`),
-  `scroll_to`, `type_text`, `pause`, `screenshot`, `dump`, `activate`, `launch`
-  (optional `launch_arguments`), `terminate`. `motion` is simulator-only.
+  `tap_first`, `tap_nearest`, `tap_point`, `swipe` (points, `direction`, or inside an
+  element), `scroll_to`, `type_text`, `pause`, `screenshot`, `dump`, `activate`, `launch`
+  (optional `launch_arguments`), `terminate`, `open_url`, and the gesture, keyboard,
+  control, assertion and device-state actions in the table in
+  [usage.md](usage.md#gestures-keyboard-controls-assertions-and-device-state).
+  Only the iPhone has multi-touch and real hardware: `pinch`, `rotate_gesture`,
+  `two_finger_tap`, `set_orientation`, volume/action/camera buttons, and SwiftUI
+  drag-and-drop (`drag` between `.draggable` and `.dropDestination`). Simulator-only:
+  `motion`, `push_notification`, `status_bar`, permission `grant`/`revoke` (a device can
+  only `reset`, which terminates the app), arrow keys, `set_picker` by `index`.
+- `set_slider` and `set_picker` use XCUITest's own adjustments (`adjust(toNormalizedSliderPosition:)`,
+  `adjust(toPickerWheelValue:)`); `tap_alert` looks on SpringBoard first, then the app.
+
+Checked on an iPhone 15 Plus with iOS 26.6.1 (AssistiveTouch on):
+
+- **Clipboard:** iOS keeps the pasteboard from a background process, so `set_clipboard` /
+  `assert_clipboard` bring the runner to the front for a moment and then reactivate the app
+  under test; the status bar briefly shows a "◀ FastDeviceUITests" back link.
+- **`open_url`** goes to the system handler (`https://` opens Safari, `App-prefs:` Settings),
+  like `simctl openurl`.
+- **Notification Center or banners on screen** make XCTest wait ~15 s, up to 4 times, before
+  each event, which can outlast the ~48 s request timeout. Close Notification Center with
+  `press_button` `home`, not `edge_swipe` `bottom`.
+- **A Home Screen context menu** (after `long_press` on an icon) keeps SpringBoard from going
+  idle: run those steps with `--no-idle-wait` / `"wait_for_idle": false`.
+- **`two_finger_tap` / `pinch` on the whole app** can fail with "Unable to compute coordinates
+  for gesture" when a full-screen overlay (AssistiveTouch) covers it; target a labelled element
+  or an `id`. The XCTest failure is a normal step FAIL and the runner keeps serving.
+- **`pinch` below 1 (zoom out)** did not zoom Maps out on that phone (it pulled the sheet or
+  panned); zoom in did. Check it on a phone without AssistiveTouch before relying on it.
+- **`set_location`** also moves the automatic time zone, and `clear: true` does not move it
+  back: toggle Settings › General › Date & Time › Set Automatically afterwards.
+- **`dismiss_keyboard`** cannot close the keyboard of an empty search field (iOS disables its
+  Search key); pass `button`.
+- `type_text` with a selector taps the field near its trailing edge but left of any small
+  button inside it (a search bar's Dictate button opens the Siri sheet). A search field is
+  `SearchField`; `element_type: "TextField"` matches it too.
+- `fastDeviceTest do` prints PASS/FAIL and labels; per-step results (`count`, `toggled`,
+  `value`) are in the flow's `metrics.json` / `--json`.
 - Only on-screen nodes match: hidden tabs stay in the SwiftUI tree, and text in a
   list row scrolled out of view reports a made-up frame near the top of the list,
   so a node must also sit inside its own cell. Use `scroll_to` to bring a row in.

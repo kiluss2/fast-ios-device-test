@@ -13,7 +13,10 @@ The engine is:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT:-$HOME/.local}/bin/fastSimulatorTest" <flow.json> [--reuse-app|--build-only|--record|--session <name>]
+"${CLAUDE_PLUGIN_ROOT:-$HOME/.local}/bin/fastSimulatorTest" start <draft.json> | do '<action json>' | labels | save <flow.json>
 ```
+
+A new screen: `start` + `do` step by step + `save`, not repeated full runs with `dump`.
 
 Decide the shape first: one flow → write and run it; up to about 5 flows on one simulator →
 `--build-only` once, then run them here with `--reuse-app`; more flows or 2+ simulators →
