@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.0 — 2026-11-02
+
+### `capture`: the picture and the tree of the same instant
+
+- New Simulator step `{"type": "capture", "name": "<name>"}` writes `<name>.png` and
+  `<name>-ui.json`, the screenshot taken while the tree is read. A `dump` then a `screenshot` are
+  0.5–1.5 s apart, enough for a 2 s toast to be in the picture and gone from the tree (checked:
+  CarWidgets "Trip saved!" toast, iPhone 17 simulator, iOS 27).
+
 ## 1.10.1 — 2026-11-02
 
 ### Taps land on Liquid Glass controls

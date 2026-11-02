@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -1293,6 +1294,19 @@ def run_action(
                 tap_point(udid, *frame_center(sort_nodes(dismissals, ["y", "x"])[0]), post_delay)
                 resolve_and_tap()
                 wait_selector(udid, success, timeout, optional_prompt_labels)
+    elif kind == "capture":
+        # The tree and the picture of the same instant: a toast or an animation is in both or in
+        # neither, which a dump and a screenshot taken one after the other cannot promise.
+        clear_prompts(udid, optional_prompt_labels)
+        name = action.get("name", f"step-{index:02d}")
+        picture = artifacts / f"{name}.png"
+        shot = threading.Thread(target=screenshot, args=(udid, picture))
+        shot.start()
+        nodes = hierarchy(udid)
+        shot.join()
+        tree = artifacts / f"{name}-ui.json"
+        write_dump(tree, nodes)
+        return {"path": str(picture), "dump": str(tree), "labels": visible_labels(nodes)}
     elif kind == "screenshot":
         clear_prompts(udid, optional_prompt_labels)
         path = artifacts / action.get("name", f"step-{index:02d}.png")

@@ -169,6 +169,9 @@ Supported actions:
   `type`, `id`, `value`, `frame`, tap `center`; a few tens of KB) and print the visible
   labels (screen order, status-bar digits removed) in the PASS line. Use it once to
   discover a selector; remove it from the final flow.
+- `capture` (Simulator): `<name>.png` and `<name>-ui.json` of the same instant, the screenshot
+  taken while the tree is read. End a comparison flow with it instead of `dump` + `screenshot`:
+  a toast or an animation is then in both or in neither.
 - `type_text`: type `text` into the focused field (US keyboard characters).
 - `launch` / `terminate`: `simctl launch` / `terminate` the flow's app, or `"app":
   "<bundle id>"`; `launch` takes `launch_arguments`.

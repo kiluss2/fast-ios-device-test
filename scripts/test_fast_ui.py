@@ -167,6 +167,19 @@ class ActionTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls.mock_calls], ["tap", "screenshot"])
         calls.tap.assert_called_once_with("SIM", 110.0, 424.0, 0.08)
 
+    def test_capture_takes_the_picture_while_it_reads_the_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            node = {"AXLabel": "Trip saved!", "type": "StaticText", "frame": {"x": 1, "y": 2, "width": 3, "height": 4}}
+            with mock.patch.object(fast_ui, "hierarchy", return_value=[node]), \
+                    mock.patch.object(fast_ui, "screenshot", side_effect=lambda udid, path: path.write_bytes(b"png")), \
+                    mock.patch.object(fast_ui, "clear_prompts"):
+                result = fast_ui.execute_action({"type": "capture", "name": "toast"}, "SIM", artifacts, 4, [])
+            self.assertEqual(result["path"], str(artifacts / "toast.png"))
+            self.assertEqual(result["dump"], str(artifacts / "toast-ui.json"))
+            self.assertTrue((artifacts / "toast.png").exists() and (artifacts / "toast-ui.json").exists())
+            self.assertIn("Trip saved!", result["labels"])
+
     def test_screenshot_reads_no_tree_when_the_flow_declares_no_prompt(self) -> None:
         with mock.patch.object(fast_ui, "hierarchy") as tree, mock.patch.object(fast_ui, "screenshot") as shot:
             fast_ui.execute_action({"type": "screenshot", "name": "home.png", "stable": False}, "SIM", Path("/tmp"), 1, [])
