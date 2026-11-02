@@ -954,9 +954,12 @@ class LifecycleTests(unittest.TestCase):
             tmp = Path(raw)
             (tmp / "Contents" / "Applications" / "DeviceHub.app").mkdir(parents=True)
             self.device_hub_calls(tmp, running=True)
-        with mock.patch.object(fast_ui, "axe") as axe:
+        with mock.patch.object(fast_ui, "axe") as axe, mock.patch.object(fast_ui.time, "sleep") as sleep:
             fast_ui.tap_point("SIM-A", 10, 20, 0.08)
-        self.assertEqual(axe.call_args.args[-1], str(fast_ui.DEVICE_HUB_TAP_SETTLE))
+        sleep.assert_called_once_with(fast_ui.DEVICE_HUB_TAP_SETTLE)
+        # A held touch, not an instant tap: Liquid Glass controls ignore a zero-length press.
+        self.assertEqual(axe.call_args.args[1:], ("touch", "-x", "10.00", "-y", "20.00", "--down", "--up",
+                                                  "--delay", str(fast_ui.TAP_HOLD)))
 
     def test_prebuilt_app_skips_build_and_derived_data(self) -> None:
         with mock.patch.object(fast_ui, "ensure_booted"), mock.patch.object(fast_ui, "build_if_needed") as build:

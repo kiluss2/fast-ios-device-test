@@ -621,13 +621,11 @@ def tap_point(udid: str, x: float, y: float, post_delay: float) -> None:
     invalidate_hierarchy(udid)
     if TRAIL is not None:
         TRAIL.touch()
-    capped, remainder = split_post_delay(max(post_delay, TAP_SETTLE))
-    axe(
-        udid, "tap", "-x", f"{x:.2f}", "-y", f"{y:.2f}",
-        "--post-delay", str(capped),
-    )
-    if remainder:
-        time.sleep(remainder)
+    # iOS 26+ Liquid Glass controls (tab bar, glass buttons) ignore an instant down/up: `axe tap`
+    # reports success and nothing happens. A short hold lands on every control.
+    axe(udid, "touch", "-x", f"{x:.2f}", "-y", f"{y:.2f}", "--down", "--up", "--delay", str(TAP_HOLD))
+    if max(post_delay, TAP_SETTLE):
+        time.sleep(max(post_delay, TAP_SETTLE))
 
 
 def long_press(udid: str, x: float, y: float, duration: float, post_delay: float) -> None:
@@ -882,6 +880,7 @@ DEVICE_HUB_WAIT = 30.0
 # measured on Xcode 27.0, 0 s lost every tap, 0.15 s one in three, 0.25 s none.
 DEVICE_HUB_TAP_SETTLE = 0.4
 TAP_SETTLE = 0.0
+TAP_HOLD = 0.08
 
 
 def ensure_device_hub(udid: str) -> None:

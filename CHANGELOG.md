@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.10.1 — 2026-11-02
+
+### Taps land on Liquid Glass controls
+
+- A tap is now a short hold (`axe touch`, 0.08 s) instead of `axe tap`. On iOS 26+ the tab bar and
+  glass buttons ignored the instant press: AXe reported success and the screen did not change
+  (checked: iPhone 17 simulator, iOS 27, the Convoy tab and Start Drive of CarWidgets; a 0.1 s hold
+  switched the tab every time). The Device Hub settle delay still follows the tap.
+
 ## 1.10.0 — 2026-10-31
 
 ### Locking the iPhone and shutting simulators down at the end
