@@ -320,12 +320,24 @@ COMMON_ARGUMENTS=(
 $ALLOW_PACKAGE_RESOLUTION || COMMON_ARGUMENTS+=(-disableAutomaticPackageResolution)
 $QUIET && COMMON_ARGUMENTS+=(-quiet)
 
+# SwiftLint is not the test's business: a no-op `swiftlint` (a function for sh/bash run-script
+# phases, which wins over a phase's own PATH, and a shim first on PATH) unless FAST_UI_SKIP_LINT=0.
+LINT_ENV=()
+case "${FAST_UI_SKIP_LINT:-1}" in
+0 | false | no | "") ;;
+*)
+    SHIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shims"
+    LINT_ENV=(env "PATH=$SHIM_DIR:$PATH"
+        "BASH_FUNC_swiftlint%%=() { echo 'note: swiftlint skipped by fastDeviceTest (FAST_UI_SKIP_LINT=0 lints)'; return 0; }")
+    ;;
+esac
+
 echo "Device: $DEVICE_UDID"
 echo "Cache:  $DERIVED_DATA_PATH"
 
 if $NEEDS_BUILD; then
     run_logged build-for-testing \
-        xcodebuild build-for-testing "${COMMON_ARGUMENTS[@]}"
+        ${LINT_ENV[@]+"${LINT_ENV[@]}"} xcodebuild build-for-testing "${COMMON_ARGUMENTS[@]}"
     if ! $DRY_RUN; then
         printf '%s\n' "$CURRENT_FINGERPRINT" > "$FINGERPRINT_FILE"
     fi

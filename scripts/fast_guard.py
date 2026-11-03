@@ -14,7 +14,7 @@ DESTRUCTIVE_WORDS = (
     "delete", "remove", "erase", "reset", "pay", "buy", "purchase", "subscribe", "send", "sign[ -]?out",
     "log[ -]?out", "unpair", "forget", "xóa", "xoá", "gỡ", "đăng xuất", "thanh toán", "mua", "gửi", "đặt lại",
 )
-GESTURES = {"tap_label", "tap_first", "tap_nearest", "long_press", "double_tap", "two_finger_tap"}
+GESTURES = {"tap_label", "tap_first", "tap_nearest", "long_press", "double_tap", "two_finger_tap", "tap_alert"}
 SELECTOR_TEXT = ("label", "label_contains", "id")
 
 
@@ -45,6 +45,9 @@ def risky_step(actions: list[dict[str, Any]]) -> tuple[int, str] | None:
         if action.get("type") not in GESTURES or action.get("confirm") is True:
             continue
         selector = action.get("target") if action.get("type") == "tap_nearest" else action
+        if action.get("type") == "tap_alert":
+            # An alert's button is the confirmation itself ("Delete" on "Delete this trip?").
+            selector = {"label": action.get("button")}
         for key in SELECTOR_TEXT:
             text = str((selector or {}).get(key) or "")
             if destructive(text):

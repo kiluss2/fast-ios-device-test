@@ -31,7 +31,8 @@ re-signs it with an existing development profile, and runs the flow on the devic
 - Supported actions: `wait`, `wait_absent`, `assert_absent`, `tap_label`,
   `tap_first`, `tap_nearest`, `tap_point`, `long_press`, `double_tap`, `drag`, `edge_swipe`,
   `swipe` (points or `direction`), `scroll_to`, `type_text`, `press_key`, `key_combo`,
-  `clear_text`, `press_button`, `set_slider`, `pause`, `screenshot`, `dump`, `activate`, `launch` (optional
+  `clear_text`, `press_button`, `set_slider`, `set_switch`, `assert_value`, `assert_count`, `tap_alert`,
+  `dismiss_keyboard`, `pull_to_refresh`, `pause`, `screenshot`, `dump`, `activate`, `launch` (optional
   `launch_arguments`), `terminate`, `open_url`, and the iPhone-only `two_finger_tap`, `two_finger_drag`, `pinch`, `rotate`,
   `orientation`, `set_picker` (see [usage.md](usage.md)). `motion` and `shake` are
   simulator-only; `press_button` `lock` is refused inside a flow (the next steps would wait
@@ -48,8 +49,13 @@ re-signs it with an existing development profile, and runs the flow on the devic
   so a node must also sit inside its own cell. Use `scroll_to` to bring a row in.
 - `launch_arguments` stick to the app object: a later `launch` without them reuses
   the previous ones. Pass `"launch_arguments": []` to launch clean.
-- Selectors take `id` (accessibilityIdentifier) and `value` as on the simulator; `dump`
-  nodes carry `id` and `value` when set. `tap_label` falls back to the one node of any
+- `tap_alert` looks in SpringBoard's alerts (permission prompts) and then the app's own;
+  `"system": true` only in SpringBoard's. iOS 27 reports an app's UIAlertController as a `Sheet` (iOS 26:
+  `Alert`); both are found, by `tap_alert` and by the prompt rules. A dialog an app draws itself is
+  neither (Safari's "cannot open the page": `tap_label` its `OK`). An XCTest failure inside a step (a gesture XCTest cannot
+  place) fails that step with `XCTest: …` instead of ending the persistent runner.
+- Selectors take `id` (accessibilityIdentifier), `value` and `enabled` as on the simulator; `dump`
+  nodes carry `id` and `value` when set, and `"enabled": false` on a disabled node. `tap_label` falls back to the one node of any
   type with that label when `element_type` is not given (result `fallback_type`).
 - **Screens that never go idle** (a GIF, a ticking clock) make XCUITest wait ~2.5 s after
   every tap. `fastDeviceTest do` runs with that wait off by default (`--idle-wait` turns it

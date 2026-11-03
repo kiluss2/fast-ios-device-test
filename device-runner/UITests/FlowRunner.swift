@@ -17,6 +17,7 @@ final class FlowRunner: XCTestCase {
         // accessibilityIdentifier and the control's value ("1" for a switch that is on).
         let identifier: String
         let value: String
+        let enabled: Bool
     }
 
     // `element_type` names a gesture can target by XCUIElement query (pinch, rotate, two_finger_tap,
@@ -35,7 +36,7 @@ final class FlowRunner: XCTestCase {
     ]
 
     // The selector keys an action may carry, shared with the Simulator engine.
-    static let selectorKeys = ["label", "label_contains", "label_is_empty", "id", "value", "element_type", "frame"]
+    static let selectorKeys = ["label", "label_contains", "label_is_empty", "id", "value", "element_type", "enabled", "frame"]
 
     private var apps: [String: XCUIApplication] = [:]
     private var current: XCUIApplication?
@@ -54,6 +55,15 @@ final class FlowRunner: XCTestCase {
     // A flow that turned the iPhone sideways turns it back when it ends.
     private var orientationChanged = false
     private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    // While an action runs, an XCTest failure (a gesture it cannot place) fails that step
+    // instead of ending the test, which would take the persistent runner down with it.
+    private var isRunningAction = false
+    private var actionIssue: String?
+
+    override func record(_ issue: XCTIssue) {
+        guard isRunningAction else { return super.record(issue) }
+        actionIssue = actionIssue ?? issue.compactDescription
+    }
 
     func testFlow() throws {
         continueAfterFailure = false
@@ -228,8 +238,12 @@ private extension FlowRunner {
 private extension FlowRunner {
     // Runs one action; a gesture that succeeded joins the screen map's trail.
     func execute(_ action: [String: Any], index: Int) throws -> [String: Any]? {
+        actionIssue = nil
+        isRunningAction = true
+        defer { isRunningAction = false }
         trail.startAction()
         let result = try perform(action, index: index)
+        if let actionIssue { throw Failure(message: "XCTest: \(actionIssue)") }
         let kind = action["type"] as? String ?? ""
         if Trail.gestureKinds.contains(kind), result?["optional_missing"] == nil {
             trail.gesture(action)
@@ -356,6 +370,69 @@ private extension FlowRunner {
             try requireKeyboardFocus(app, kind)
             app.typeText(text)
             Thread.sleep(forTimeInterval: postDelay)
+        case "dismiss_keyboard":
+            try dismissKeyboard(app, button: action["button"] as? String)
+        case "pull_to_refresh":
+            if screenBounds.isInfinite { _ = snapshotNodes() }
+            let area = hasSelector(action) ? try resolveNode(action, timeout: timeout).frame : screenBounds
+            guard !area.isInfinite else { throw Failure(message: "pull_to_refresh has no screen size: the current app is not running") }
+            let x = Double(area.midX)
+            trail.touch()
+            point(x, Double(area.minY + area.height * 0.25)).press(
+                forDuration: 0.05, thenDragTo: point(x, Double(area.minY + area.height * 0.75)),
+                withVelocity: .slow, thenHoldForDuration: 0.3
+            )
+            Thread.sleep(forTimeInterval: max(postDelay, 1.0))
+        case "set_switch":
+            guard let on = action["on"] as? Bool else { throw Failure(message: "set_switch needs on: true or false in action \(index)") }
+            return try setSwitch(action, on: on, timeout: timeout, postDelay: postDelay)
+        case "tap_alert":
+            guard let label = action["button"] as? String else { throw Failure(message: "tap_alert needs button in action \(index)") }
+            return try tapAlert(label, app: app, systemOnly: action["system"] as? Bool ?? false,
+                                optional: action["optional"] as? Bool ?? false, timeout: timeout, postDelay: postDelay)
+        case "assert_value":
+            let attribute = action["attribute"] as? String ?? "value"
+            guard ["value", "label"].contains(attribute) else { throw Failure(message: "attribute must be value or label") }
+            _ = try checkText("", action)  // a step without equals/contains/… fails here, before any polling
+            var complaint = "no node matched the selector"
+            do {
+                _ = try waitNodes(timeout) { nodes in
+                    let read: (Node) -> String = { attribute == "label" ? $0.label : $0.value }
+                    let candidates = self.sorted(nodes.filter { self.matches($0, action) }, by: ["y", "x"])
+                    // A row's container often carries the control's id (or label) without its value:
+                    // read the top-left match that has the attribute at all.
+                    guard let node = candidates.first(where: { !read($0).isEmpty }) ?? candidates.first else {
+                        complaint = "no node matched the selector"
+                        return false
+                    }
+                    // Not `try?`: it flattens a throw and a pass into the same nil.
+                    do {
+                        guard let failure = try self.checkText(read(node), action) else {
+                            return true
+                        }
+                        complaint = "\(attribute) of the \(node.type) \(failure)"
+                    } catch {
+                        complaint = self.message(error)
+                    }
+                    return false
+                }
+            } catch {
+                throw Failure(message: "\(complaint) after \(timeout)s; visible labels: \(lastLabels)")
+            }
+        case "assert_count":
+            guard action["count"] != nil || action["min"] != nil || action["max"] != nil else {
+                throw Failure(message: "assert_count needs count, min or max")
+            }
+            var seen = 0
+            do {
+                _ = try waitNodes(timeout) { nodes in
+                    seen = self.distinctFrames(nodes.filter { self.matches($0, action) }).count
+                    return self.countFailure(seen, action) == nil
+                }
+            } catch {
+                throw Failure(message: "\(seen) nodes matched, \(countFailure(seen, action) ?? "") after \(timeout)s; visible labels: \(lastLabels)")
+            }
+            return ["count": seen]
         case "pause":
             Thread.sleep(forTimeInterval: number(action["seconds"]) ?? 1)
         case "screenshot":
@@ -631,6 +708,136 @@ private extension FlowRunner {
     }
 }
 
+// MARK: - Controls and checks
+private extension FlowRunner {
+    func hasSelector(_ action: [String: Any]) -> Bool {
+        FlowRunner.selectorKeys.contains { action[$0] != nil }
+    }
+
+    // The top-left node matching the action's selector keys (and `accept`), waiting for it like `wait`.
+    func resolveNode(_ selector: [String: Any], timeout: Double, accept: @escaping (Node) -> Bool = { _ in true }) throws -> Node {
+        let found: (Node) -> Bool = { self.matches($0, selector) && accept($0) }
+        let nodes: [Node]
+        do {
+            nodes = try waitNodes(timeout) { nodes in nodes.contains(where: found) }
+        } catch {
+            throw Failure(message: "no node matched the selector after \(timeout)s; visible labels: \(lastLabels)")
+        }
+        guard let node = sorted(nodes.filter(found), by: ["y", "x"]).first else {
+            throw Failure(message: "no node matched the selector; visible labels: \(lastLabels)")
+        }
+        return node
+    }
+
+    func dismissKeyboard(_ app: XCUIApplication, button: String?) throws {
+        guard app.keyboards.firstMatch.exists else { return }
+        if let button {
+            let target = [app.keyboards.buttons[button], app.toolbars.buttons[button], app.buttons[button]]
+                .first { $0.exists }
+            guard let target else { throw Failure(message: "no '\(button)' button on screen; visible labels: \(lastLabels)") }
+            trail.touch()
+            target.tap()
+        } else {
+            // The first Return can be spent accepting an autocorrect suggestion.
+            for _ in 0..<3 {
+                app.typeText("\n")
+                if keyboardGone(app, within: 0.6) { break }
+            }
+        }
+        // The keyboard is still sliding down for ~0.3 s after the tap that closed it.
+        if !keyboardGone(app, within: 2) {
+            throw Failure(message: "the keyboard is still up; name the field's dismiss button with \"button\"")
+        }
+    }
+
+    func keyboardGone(_ app: XCUIApplication, within seconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while app.keyboards.firstMatch.exists {
+            guard Date() < deadline else { return false }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return true
+    }
+
+    // Taps only when the switch is not already in the wanted state, then waits for the change.
+    func setSwitch(_ action: [String: Any], on: Bool, timeout: Double, postDelay: Double) throws -> [String: Any] {
+        let isSwitch: (Node) -> Bool = { ["Switch", "CheckBox"].contains($0.type) && ["0", "1"].contains($0.value) }
+        let node = try resolveNode(action, timeout: timeout, accept: isSwitch)
+        let wanted = on ? "1" : "0"
+        guard node.value != wanted else { return ["toggled": false] }
+        // A SwiftUI Toggle spans its row and flips only when the switch itself is hit.
+        let x = node.frame.width > 120 ? node.frame.maxX - 36 : node.frame.midX
+        tap(Double(x), Double(node.frame.midY), postDelay)
+        let origin = node.frame.origin
+        do {
+            _ = try waitNodes(timeout) { nodes in
+                nodes.contains { isSwitch($0) && $0.value == wanted && abs($0.frame.minX - origin.x) < 4 && abs($0.frame.minY - origin.y) < 4 }
+            }
+        } catch {
+            throw Failure(message: "switch did not turn \(on ? "on" : "off") after \(timeout)s; visible labels: \(lastLabels)")
+        }
+        return ["toggled": true]
+    }
+
+    // System alerts belong to SpringBoard, an app's own alerts to the app; `systemOnly` skips the app's.
+    func tapAlert(_ label: String, app: XCUIApplication, systemOnly: Bool, optional: Bool,
+                  timeout: Double, postDelay: Double) throws -> [String: Any] {
+        let owners = systemOnly ? [springboard] : [springboard, app]
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for owner in owners {
+                let alert = alertContainer(owner)
+                let button = alert.buttons[label]
+                if alert.exists, button.exists {
+                    let title = alert.label
+                    trail.touch()
+                    button.tap()
+                    Thread.sleep(forTimeInterval: postDelay)
+                    return ["alert": title, "system": owner === springboard]
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        // A permission prompt iOS chose not to show (already answered) is no failure of the flow.
+        if optional { return ["skipped": true] }
+        _ = snapshotNodes()
+        throw Failure(message: "no alert with a '\(label)' button after \(timeout)s; visible labels: \(lastLabels)")
+    }
+
+    // Why `actual` fails equals/not_equals/contains/matches; nil when it passes.
+    func checkText(_ actual: String, _ action: [String: Any]) throws -> String? {
+        let checks = ["equals", "not_equals", "contains", "matches"].filter { action[$0] != nil }
+        guard !checks.isEmpty else { throw Failure(message: "needs equals, not_equals, contains or matches") }
+        for key in checks {
+            let expected = "\(action[key]!)"
+            switch key {
+            case "equals" where actual != expected: return "is '\(actual)', expected '\(expected)'"
+            case "not_equals" where actual == expected: return "is still '\(actual)'"
+            case "contains" where !actual.contains(expected): return "is '\(actual)', expected it to contain '\(expected)'"
+            case "matches" where actual.range(of: expected, options: .regularExpression) == nil:
+                return "is '\(actual)', expected it to match /\(expected)/"
+            default: continue
+            }
+        }
+        return nil
+    }
+
+    func countFailure(_ count: Int, _ action: [String: Any]) -> String? {
+        if let wanted = number(action["count"]), count != Int(wanted) { return "expected \(Int(wanted))" }
+        if let minimum = number(action["min"]), count < Int(minimum) { return "expected at least \(Int(minimum))" }
+        if let maximum = number(action["max"]), count > Int(maximum) { return "expected at most \(Int(maximum))" }
+        return nil
+    }
+
+    // XCUITest nests a text in containers with the same frame; those count once.
+    func distinctFrames(_ nodes: [Node]) -> [Node] {
+        var seen = Set<String>()
+        return nodes.filter { node in
+            seen.insert("\(node.frame.minX.rounded()),\(node.frame.minY.rounded()),\(node.frame.width.rounded()),\(node.frame.height.rounded())").inserted
+        }
+    }
+}
+
 // MARK: - Hierarchy
 private extension FlowRunner {
     @discardableResult
@@ -659,7 +866,7 @@ private extension FlowRunner {
             }
             let value = element.value.map { ($0 as? String) ?? String(describing: $0) } ?? ""
             nodes.append(Node(label: element.label, type: typeName(element.elementType), frame: element.frame,
-                              cell: cell, identifier: element.identifier, value: value))
+                              cell: cell, identifier: element.identifier, value: value, enabled: element.isEnabled))
             let childCell = element.elementType == .cell ? element.frame : cell
             element.children.forEach { walk($0, cell: childCell) }
         }
@@ -689,7 +896,7 @@ private extension FlowRunner {
     func dismissPrompt() -> Bool {
         guard !promptEntries.isEmpty else { return false }
         for owner in [springboard] + [current].compactMap({ $0 }) {
-            let alert = owner.alerts.firstMatch
+            let alert = alertContainer(owner)
             guard alert.exists, let snapshot = try? alert.snapshot() else { continue }
             let parts = descendants(of: snapshot)
             let title = snapshot.label.isEmpty
@@ -705,6 +912,15 @@ private extension FlowRunner {
             return true
         }
         return false
+    }
+
+    // iOS 27 reports a UIAlertController as a sheet (iOS 26 and earlier: an alert); one query
+    // covers both, since this runs on every poll of a wait.
+    func alertContainer(_ owner: XCUIApplication) -> XCUIElement {
+        owner.descendants(matching: .any).matching(NSPredicate(
+            format: "elementType == %lu OR elementType == %lu",
+            XCUIElement.ElementType.alert.rawValue, XCUIElement.ElementType.sheet.rawValue
+        )).firstMatch
     }
 
     func descendants(of element: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
@@ -785,6 +1001,7 @@ private extension FlowRunner {
         if let identifier = selector["id"] as? String, node.identifier != identifier { return false }
         if let value = selector["value"], node.value != "\(value)" { return false }
         if selector["label_is_empty"] as? Bool ?? false, !node.label.isEmpty { return false }
+        if let enabled = selector["enabled"] as? Bool, node.enabled != enabled { return false }
         if let type = selector["element_type"] as? String, !typeMatches(node.type, type) { return false }
         let limits = selector["frame"] as? [String: Any] ?? [:]
         let values: [String: Double] = [
@@ -831,6 +1048,7 @@ private extension FlowRunner {
         case .link: return "Link"
         case .tab: return "Tab"
         case .alert: return "Alert"
+        case .sheet: return "Sheet"
         case .application: return "Application"
         case .window: return "Window"
         default: return "Other"
@@ -867,6 +1085,7 @@ private extension FlowRunner {
                 ]
                 if !node.identifier.isEmpty { entry["id"] = node.identifier }
                 if !node.value.isEmpty { entry["value"] = node.value }
+                if !node.enabled { entry["enabled"] = false }
                 return entry
             }
     }

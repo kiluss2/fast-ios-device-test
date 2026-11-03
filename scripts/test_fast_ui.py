@@ -25,6 +25,17 @@ import fast_ui_map  # noqa: E402
 # Pillow is optional for the engine (only `motion` needs it), so the suite must run without it.
 HAVE_PILLOW = importlib.util.find_spec("PIL") is not None
 
+_LOCKS = tempfile.TemporaryDirectory()
+
+
+def setUpModule() -> None:
+    # main() takes a simulator lease; keep the tests' leases out of ~/Library/Caches.
+    fast_ui.LOCK_DIR = Path(_LOCKS.name)
+
+
+def tearDownModule() -> None:
+    _LOCKS.cleanup()
+
 
 def app_spec(tmp: Path, simulator: str) -> dict:
     src = tmp / "Sources"
@@ -768,7 +779,7 @@ class SimulatorTrailTests(unittest.TestCase):
             with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow)]), \
                     mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
                     mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "apply_ui_settings"), \
-                    mock.patch.object(fast_ui, "set_preferences"), mock.patch.object(fast_ui, "reset_preferences"), \
+                    mock.patch.object(fast_ui, "set_preferences"), \
                     mock.patch.object(fast_ui, "restore_ui_settings"), mock.patch.object(fast_ui, "record"), \
                     mock.patch.object(fast_ui, "axe", side_effect=FakeAxe(self.A)), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -785,7 +796,7 @@ class SimulatorTrailTests(unittest.TestCase):
             with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow)]), \
                     mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
                     mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "apply_ui_settings"), \
-                    mock.patch.object(fast_ui, "set_preferences"), mock.patch.object(fast_ui, "reset_preferences"), \
+                    mock.patch.object(fast_ui, "set_preferences"), \
                     mock.patch.object(fast_ui, "restore_ui_settings", side_effect=RuntimeError("simctl gone")), \
                     mock.patch.object(fast_ui, "axe", side_effect=FakeAxe(self.A)), \
                     mock.patch.object(fast_ui, "record") as record, contextlib.redirect_stdout(io.StringIO()):
@@ -1258,6 +1269,564 @@ class ShutdownTests(unittest.TestCase):
         self.assertEqual(shutdowns, [["xcrun", "simctl", "shutdown", "B"]])
         _, none = self.run_shutdown("--simulator", "Z")
         self.assertIn("SHUTDOWN none booted", none)
+
+
+def pbxproj_with(script: str, name: str = "SwiftLint") -> str:
+    escaped = script.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return (
+        "\t\tAA /* Lint */ = {\n\t\t\tisa = PBXShellScriptBuildPhase;\n"
+        f"\t\t\tname = {name};\n\t\t\tshellScript = \"{escaped}\";\n\t\t}};\n"
+    )
+
+
+class LintTests(unittest.TestCase):
+    def report(self, script: str) -> tuple[str, list[str]]:
+        with tempfile.TemporaryDirectory() as raw:
+            project = Path(raw) / "App.xcodeproj"
+            project.mkdir()
+            (project / "project.pbxproj").write_text(pbxproj_with(script))
+            return fast_ui.lint_report(project)
+
+    def test_plain_swiftlint_is_shimmed(self) -> None:
+        self.assertEqual(self.report("if which swiftlint >/dev/null; then\n  swiftlint\nfi\n"), ("shimmed", ["SwiftLint"]))
+
+    def test_path_prepend_is_shimmed_in_sh_and_reported_in_zsh(self) -> None:
+        script = 'if [[ "$(uname -m)" == arm64 ]]; then\n  export PATH="/opt/homebrew/bin:$PATH"\nfi\nswiftlint\n'
+        self.assertEqual(self.report(script), ("shimmed", ["SwiftLint"]))
+        with tempfile.TemporaryDirectory() as raw:
+            project = Path(raw) / "App.xcodeproj"
+            project.mkdir()
+            (project / "project.pbxproj").write_text(
+                pbxproj_with(script).replace("isa = PBXShellScriptBuildPhase;", "isa = PBXShellScriptBuildPhase;\n\t\t\tshellPath = /bin/zsh;"))
+            state, detail = fast_ui.lint_report(project)
+        self.assertEqual(state, "not-shimmable")
+        self.assertIn("prepends to PATH", detail[0])
+
+    def test_the_function_beats_a_path_prepend(self) -> None:
+        """What a sh run-script phase in SwiftLint's README form runs under a skipped build."""
+        with tempfile.TemporaryDirectory() as raw:
+            real = Path(raw) / "swiftlint"
+            real.write_text("#!/bin/sh\necho REAL; exit 2\n")
+            real.chmod(0o755)
+            env = fast_ui.lint_skip_env({"PATH": "/usr/bin:/bin"})
+            result = subprocess.run(
+                ["/bin/sh", "-c", f'export PATH="{raw}:$PATH"\nif which swiftlint >/dev/null; then swiftlint; fi'],
+                capture_output=True, text=True, env=env,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("swiftlint skipped", result.stdout)
+
+    def test_absolute_path_is_reported(self) -> None:
+        state, detail = self.report('"${PODS_ROOT}/SwiftLint/swiftlint"\n')
+        self.assertEqual(state, "not-shimmable")
+        self.assertIn("by path", detail[0])
+
+    def test_build_tool_plugin_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            project = Path(raw) / "App.xcodeproj"
+            project.mkdir()
+            (project / "project.pbxproj").write_text("productName = SwiftLintBuildToolPlugin;\n")
+            state, detail = fast_ui.lint_report(project)
+        self.assertEqual(state, "not-shimmable")
+        self.assertIn("build-tool plugin", detail[0])
+
+    def test_workspace_reads_its_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "App.xcodeproj").mkdir()
+            (root / "App.xcodeproj/project.pbxproj").write_text(pbxproj_with("swiftlint\n"))
+            (root / "App.xcworkspace").mkdir()
+            (root / "App.xcworkspace/contents.xcworkspacedata").write_text(
+                '<Workspace><FileRef location = "group:App.xcodeproj"></FileRef></Workspace>')
+            self.assertEqual(fast_ui.lint_report(root / "App.xcworkspace"), ("shimmed", ["SwiftLint"]))
+
+    def test_no_lint_phase(self) -> None:
+        self.assertEqual(self.report("echo hi\n"), ("none", []))
+
+    def test_a_commented_out_swiftlint_is_no_phase(self) -> None:
+        self.assertEqual(self.report("# swiftlint\necho hi\n"), ("none", []))
+
+    def test_build_failure_names_lint_and_first_error(self) -> None:
+        output = "A.swift:3:1: error: Line Length Violation: too long (line_length)\n** BUILD FAILED **\n"
+        message = fast_ui.build_failure(output, "on", ["SwiftLint"])
+        self.assertIn("SwiftLint", message)
+        self.assertIn("first error: A.swift:3:1: error: Line Length Violation", message)
+        self.assertIn('remove "skip_lint": false', message)
+
+    def test_build_failure_names_the_failing_phase_and_counts_errors(self) -> None:
+        output = (
+            "/src/A.swift:1:1: error: cannot find 'x' in scope\n"
+            "/src/B.swift:2:1: error: missing return\n"
+            "** BUILD FAILED **\n\nThe following build commands failed:\n"
+            "\tSwiftCompile normal arm64 /src/A.swift (in target 'App' from project 'App')\n"
+            "\tPhaseScriptExecution Generate\\ Assets /dd/Script.sh (in target 'App' from project 'App')\n"
+            "(2 failures)\n"
+        )
+        message = fast_ui.build_failure(output, "none", [])
+        self.assertIn("in SwiftCompile normal arm64, run-script phase 'Generate Assets'", message)
+        self.assertIn("first error: /src/A.swift:1:1: error: cannot find 'x' in scope (+1 more)", message)
+        self.assertNotIn("hint:", message)
+
+    def test_build_failure_without_error_lines_keeps_the_tail(self) -> None:
+        message = fast_ui.build_failure("line 1\nline 2\n** BUILD FAILED **\n", "none", [])
+        self.assertIn("| line 1 | line 2 | ** BUILD FAILED **", message)
+
+    def test_skip_lint_default_and_overrides(self) -> None:
+        with mock.patch.dict(fast_ui.os.environ, {}, clear=True):
+            self.assertTrue(fast_ui.skip_lint_enabled({}))
+            self.assertFalse(fast_ui.skip_lint_enabled({"skip_lint": False}))
+        with mock.patch.dict(fast_ui.os.environ, {"FAST_UI_SKIP_LINT": "0"}):
+            self.assertFalse(fast_ui.skip_lint_enabled({"skip_lint": True}))
+        with mock.patch.dict(fast_ui.os.environ, {"FAST_UI_SKIP_LINT": "1"}):
+            self.assertTrue(fast_ui.skip_lint_enabled({"skip_lint": False}))
+
+    def test_shim_is_executable_noop(self) -> None:
+        shim = fast_ui.SHIM_DIR / "swiftlint"
+        result = subprocess.run([str(shim), "lint", "--strict"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("swiftlint skipped", result.stdout)
+
+    def build(self, app_extra: dict, environ: dict[str, str], returncode: int = 0,
+              output: str = "") -> tuple[mock.MagicMock, str]:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            app = {**app_spec(tmp, "SIM"), **app_extra}
+            (tmp / "App.xcodeproj").mkdir()
+            (tmp / "App.xcodeproj/project.pbxproj").write_text(pbxproj_with("swiftlint\n"))
+            result = subprocess.CompletedProcess([], returncode, output, "")
+            err = io.StringIO()
+            with mock.patch.object(fast_ui, "command", return_value=result) as command, \
+                    mock.patch.object(fast_ui, "verify_app"), mock.patch.dict(fast_ui.os.environ, environ), \
+                    contextlib.redirect_stderr(err):
+                try:
+                    fast_ui.build_if_needed(app, tmp, "SIM", tmp / "App.app", tmp / "dd")
+                    log = ""
+                except fast_ui.FastUIError as error:
+                    log = (tmp / "dd/.fastui-build.log").read_text()
+                    err.write(f"\nERROR {error}")
+            return command, err.getvalue() + log
+
+    def test_build_runs_with_the_shim_and_reports_lint_state(self) -> None:
+        command, err = self.build({}, {"FAST_UI_SKIP_LINT": "1"})
+        env = command.call_args.kwargs["env"]
+        self.assertTrue(env["PATH"].startswith(str(fast_ui.SHIM_DIR)))
+        self.assertIn("swiftlint", env["BASH_FUNC_swiftlint%%"])
+        self.assertIn("lint=shimmed (SwiftLint)", err)
+
+    def test_build_with_lint_on_keeps_the_path(self) -> None:
+        command, err = self.build({"skip_lint": False}, {"FAST_UI_SKIP_LINT": "0", "PATH": "/usr/bin"})
+        env = command.call_args.kwargs["env"]
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertNotIn("BASH_FUNC_swiftlint%%", env)
+        self.assertIn("lint=on", err)
+
+    def test_failed_build_says_why_and_keeps_the_log(self) -> None:
+        output = "/src/A.swift:1:1: error: cannot find 'x' in scope\n** BUILD FAILED **\n"
+        _, err = self.build({}, {"FAST_UI_SKIP_LINT": "1"}, returncode=65, output=output)
+        self.assertIn("ERROR build failed first error: /src/A.swift:1:1: error: cannot find 'x' in scope", err)
+        self.assertIn(".fastui-build.log", err)
+        self.assertIn("cannot find 'x' in scope", err.split("ERROR")[1])
+
+
+def frame(x: float, y: float, w: float, h: float) -> dict:
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
+# Shapes measured with AXe on iOS 27: a notification prompt replaces the tree with
+# SpringBoard's (root label " "); an in-app alert keeps the app's root.
+SYSTEM_PROMPT = [
+    {"type": "Application", "AXLabel": " ", "frame": frame(0, 0, 402, 874)},
+    {"type": "Sheet", "AXLabel": "“App” Would Like to Send You Notifications", "frame": frame(41, 344, 320, 214)},
+    {"type": "Button", "AXLabel": "Don’t Allow", "frame": frame(57, 494, 140, 48)},
+    {"type": "Button", "AXLabel": "Allow", "frame": frame(205, 494, 140, 48)},
+]
+IN_APP_ALERT = [
+    {"type": "Application", "AXLabel": "App", "frame": frame(0, 0, 402, 874)},
+    {"type": "Sheet", "AXLabel": "Confirm", "frame": frame(41, 388, 320, 126)},
+    {"type": "Button", "AXLabel": "OK", "frame": frame(205, 450, 140, 48)},
+]
+IN_APP_ALLOW_BUTTON = [
+    {"type": "Application", "AXLabel": "App", "frame": frame(0, 0, 402, 874)},
+    {"type": "Button", "AXLabel": "Allow", "AXUniqueId": "inapp_allow", "frame": frame(16, 208, 370, 52)},
+]
+
+
+class SystemAlertTests(unittest.TestCase):
+    def setUp(self) -> None:
+        fast_ui.AUTO_TAPPED.clear()
+
+    def run_action(self, action: dict, prompts: list | None = None) -> dict | None:
+        return fast_ui.execute_action(action, "SIM", Path("/tmp"), 1, prompts or [])
+
+    def test_system_alert_told_apart_from_in_app(self) -> None:
+        self.assertEqual(fast_ui.system_alert(SYSTEM_PROMPT)["type"], "Sheet")
+        self.assertIsNone(fast_ui.system_alert(IN_APP_ALERT))
+        self.assertIsNone(fast_ui.system_alert(IN_APP_ALLOW_BUTTON))
+
+    def test_tap_alert_ignores_plain_in_app_button(self) -> None:
+        with mock.patch.object(fast_ui, "hierarchy", return_value=IN_APP_ALLOW_BUTTON), \
+                mock.patch.object(fast_ui, "tap_point") as tap, mock.patch.object(fast_ui.time, "sleep"), \
+                mock.patch.object(fast_ui.time, "perf_counter", side_effect=itertools.count(0, 1)):
+            result = self.run_action({"type": "tap_alert", "button": "Allow", "timeout": 3, "optional": True})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "no alert with a 'Allow' button"):
+                self.run_action({"type": "tap_alert", "button": "Allow", "timeout": 3})
+        tap.assert_not_called()
+        self.assertEqual(result, {"skipped": True})
+
+    def test_tap_alert_taps_system_and_in_app_alerts(self) -> None:
+        with mock.patch.object(fast_ui, "hierarchy", return_value=SYSTEM_PROMPT), \
+                mock.patch.object(fast_ui, "tap_point") as tap:
+            result = self.run_action({"type": "tap_alert", "button": "Allow"})
+        tap.assert_called_once_with("SIM", 275.0, 518.0, 0.15)
+        self.assertEqual(result, {"alert": "“App” Would Like to Send You Notifications", "system": True})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=IN_APP_ALERT), mock.patch.object(fast_ui, "tap_point"):
+            self.assertFalse(self.run_action({"type": "tap_alert", "button": "OK"})["system"])
+
+    def test_tap_alert_system_true_skips_an_in_app_alert(self) -> None:
+        with mock.patch.object(fast_ui, "hierarchy", return_value=IN_APP_ALERT), \
+                mock.patch.object(fast_ui, "tap_point") as tap, mock.patch.object(fast_ui.time, "sleep"), \
+                mock.patch.object(fast_ui.time, "perf_counter", side_effect=itertools.count(0, 1)):
+            result = self.run_action({"type": "tap_alert", "button": "OK", "system": True, "timeout": 3, "optional": True})
+        tap.assert_not_called()
+        self.assertEqual(result, {"skipped": True})
+
+    def test_tap_alert_returns_at_once_when_auto_tap_pressed_it(self) -> None:
+        with mock.patch.object(fast_ui, "hierarchy", side_effect=[SYSTEM_PROMPT, IN_APP_ALLOW_BUTTON]), \
+                mock.patch.object(fast_ui, "tap_point") as tap:
+            result = self.run_action({"type": "tap_alert", "button": "Allow", "timeout": 3, "optional": True}, ["Allow"])
+        tap.assert_called_once()  # the auto-tap; the in-app Allow is never pressed
+        self.assertTrue(result["auto_tapped"])
+
+    def test_auto_tap_only_inside_system_alert(self) -> None:
+        with mock.patch.object(fast_ui, "hierarchy", return_value=IN_APP_ALLOW_BUTTON), \
+                mock.patch.object(fast_ui, "tap_point") as tap:
+            fast_ui.wait_nodes("SIM", lambda nodes: True, 1, ["Allow"])
+        tap.assert_not_called()
+
+    def test_a_button_that_stays_is_tapped_at_most_four_times(self) -> None:
+        with mock.patch.object(fast_ui, "hierarchy", return_value=SYSTEM_PROMPT), \
+                mock.patch.object(fast_ui, "tap_point") as tap, mock.patch.object(fast_ui.time, "sleep"), \
+                mock.patch.object(fast_ui.time, "perf_counter", side_effect=itertools.count(0, 0.5)):
+            with self.assertRaises(fast_ui.FastUIError):
+                fast_ui.wait_nodes("SIM", lambda nodes: False, 3, ["Allow"])
+        self.assertEqual(tap.call_count, fast_ui.PROMPT_TAPS)
+
+    def test_tap_alert_is_guarded_in_a_multi_step_request(self) -> None:
+        import fast_guard
+        self.assertEqual(fast_guard.risky_step([{"type": "tap_label", "label": "Edit"},
+                                                {"type": "tap_alert", "button": "Delete"}]), (2, "Delete"))
+        self.assertIsNone(fast_guard.risky_step([{"type": "tap_label", "label": "Edit"},
+                                                 {"type": "tap_alert", "button": "Delete", "confirm": True}]))
+
+
+class ControlTests(unittest.TestCase):
+    """set_switch, assert_value, assert_count, dismiss_keyboard, pull_to_refresh, `enabled`."""
+
+    def run_action(self, action: dict) -> dict | None:
+        return fast_ui.execute_action(action, "SIM", Path("/tmp"), 1, [], {}, "com.x")
+
+    @staticmethod
+    def node(**fields) -> dict:
+        box = fields.pop("frame", {"x": 0, "y": 100, "width": 100, "height": 40})
+        return {"type": "Button", "frame": box, **fields}
+
+    def test_set_switch_taps_only_when_the_value_differs(self) -> None:
+        off = self.node(AXLabel="Wi-Fi", type="CheckBox", AXValue=0, frame={"x": 0, "y": 100, "width": 300, "height": 40})
+        on = {**off, "AXValue": 1}
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[on]), mock.patch.object(fast_ui, "axe") as axe:
+            self.assertEqual(self.run_action({"type": "set_switch", "label": "Wi-Fi", "on": True}), {"toggled": False})
+        axe.assert_not_called()
+        with mock.patch.object(fast_ui, "hierarchy", side_effect=[[off], [on]]), \
+                mock.patch.object(fast_ui, "axe") as axe, mock.patch.object(fast_ui.time, "sleep"):
+            self.assertEqual(self.run_action({"type": "set_switch", "label": "Wi-Fi", "on": True}), {"toggled": True})
+        # A wide (SwiftUI row) switch is touched near its trailing edge, held long enough to flip.
+        axe.assert_called_once_with("SIM", "touch", "-x", "264.00", "-y", "120.00", "--down", "--up", "--delay", "0.3")
+
+    def test_set_switch_touches_again_once_when_the_first_touch_was_dropped(self) -> None:
+        off = self.node(AXLabel="Wi-Fi", type="CheckBox", AXValue="0", frame={"x": 0, "y": 100, "width": 300, "height": 40})
+        on = {**off, "AXValue": "1"}
+        clock = itertools.count(0, 0.5)
+        # Dropped under load (measured: 1 of 8 touches on a loaded Mac): the value stays 0 for 2 s.
+        trees = [[off]] + [[off]] * 5 + [[on]]
+        with mock.patch.object(fast_ui, "hierarchy", side_effect=trees), \
+                mock.patch.object(fast_ui, "axe") as axe, mock.patch.object(fast_ui.time, "sleep"), \
+                mock.patch.object(fast_ui.time, "perf_counter", side_effect=lambda: next(clock)):
+            self.assertEqual(self.run_action({"type": "set_switch", "label": "Wi-Fi", "on": True}),
+                             {"toggled": True, "touches": 2})
+        self.assertEqual(axe.call_count, 2)
+
+    def test_set_switch_that_does_not_flip_fails(self) -> None:
+        off = self.node(AXLabel="Wi-Fi", type="Switch", AXValue="0")
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[off]), mock.patch.object(fast_ui, "axe"), \
+                mock.patch.object(fast_ui.time, "sleep"):
+            with self.assertRaisesRegex(fast_ui.FastUIError, "switch did not turn on"):
+                self.run_action({"type": "set_switch", "label": "Wi-Fi", "on": True, "timeout": 0.2})
+        with self.assertRaisesRegex(fast_ui.FastUIError, "needs 'on'|missing 'on'"):
+            self.run_action({"type": "set_switch", "label": "Wi-Fi"})
+
+    def test_set_switch_ignores_a_label_that_is_not_a_switch(self) -> None:
+        caption = self.node(AXLabel="Wi-Fi", type="StaticText")
+        switch = self.node(AXLabel="Wi-Fi", type="Switch", AXValue="1", frame={"x": 300, "y": 100, "width": 51, "height": 31})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[caption, switch]), \
+                mock.patch.object(fast_ui, "axe") as axe:
+            self.assertEqual(self.run_action({"type": "set_switch", "label": "Wi-Fi", "on": True}), {"toggled": False})
+        axe.assert_not_called()
+
+    def test_assert_value_reads_numeric_zero_and_explains_a_miss(self) -> None:
+        field = self.node(AXUniqueId="count", AXValue=0)
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[field]), mock.patch.object(fast_ui.time, "sleep"):
+            self.run_action({"type": "assert_value", "id": "count", "equals": "0"})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "value of the Button is '0', expected '7'"):
+                self.run_action({"type": "assert_value", "id": "count", "equals": "7", "timeout": 0.2})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "needs equals"):
+                self.run_action({"type": "assert_value", "id": "count"})
+            self.run_action({"type": "assert_value", "id": "count", "not_equals": "1", "matches": "^[0-9]$"})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "no node matched the selector"):
+                self.run_action({"type": "assert_value", "id": "total", "equals": "0", "timeout": 0.2})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "attribute must be value or label"):
+                self.run_action({"type": "assert_value", "id": "count", "attribute": "frame", "equals": "0"})
+
+    def test_assert_value_reads_the_node_that_has_the_value(self) -> None:
+        """Measured in Settings on iOS 27: the row's Group, the CheckBox and a Button share the id."""
+        row = self.node(AXUniqueId="BUTTON_SHAPES", type="Group", AXValue=None,
+                        frame={"x": 20, "y": 240, "width": 360, "height": 52})
+        switch = self.node(AXUniqueId="BUTTON_SHAPES", type="CheckBox", AXValue="1",
+                           frame={"x": 36, "y": 252, "width": 330, "height": 28})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[row, switch]), mock.patch.object(fast_ui.time, "sleep"):
+            self.run_action({"type": "assert_value", "id": "BUTTON_SHAPES", "equals": "1"})
+            with self.assertRaisesRegex(fast_ui.FastUIError, r"value of the CheckBox is '1', expected '0'"):
+                self.run_action({"type": "assert_value", "id": "BUTTON_SHAPES", "equals": "0", "timeout": 0.2})
+
+    def test_assert_value_checks_the_top_left_match(self) -> None:
+        lower = self.node(AXLabel="$5", type="StaticText", frame={"x": 0, "y": 500, "width": 50, "height": 20})
+        upper = self.node(AXLabel="$9", type="StaticText", frame={"x": 0, "y": 80, "width": 50, "height": 20})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[lower, upper]), mock.patch.object(fast_ui.time, "sleep"):
+            self.run_action({"type": "assert_value", "label_contains": "$", "attribute": "label", "equals": "$9"})
+            with self.assertRaisesRegex(fast_ui.FastUIError, r"label of the StaticText is '\$9', expected it to contain '\$5'"):
+                self.run_action({"type": "assert_value", "label_contains": "$", "attribute": "label",
+                                 "contains": "$5", "timeout": 0.2})
+
+    def test_assert_count_counts_each_box_once(self) -> None:
+        row = self.node(AXLabel="Row 1", type="StaticText")
+        nested = {**row}
+        other = self.node(AXLabel="Row 2", type="StaticText", frame={"x": 0, "y": 200, "width": 100, "height": 40})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[row, nested, other]), \
+                mock.patch.object(fast_ui.time, "sleep"):
+            self.assertEqual(self.run_action({"type": "assert_count", "label_contains": "Row", "count": 2}), {"count": 2})
+            self.assertEqual(self.run_action({"type": "assert_count", "label_contains": "Row", "max": 2}), {"count": 2})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "2 nodes matched, expected at least 3"):
+                self.run_action({"type": "assert_count", "label_contains": "Row", "min": 3, "timeout": 0.2})
+            with self.assertRaisesRegex(fast_ui.FastUIError, "needs count, min or max"):
+                self.run_action({"type": "assert_count", "label_contains": "Row"})
+            self.assertEqual(self.run_action({"type": "assert_count", "label": "Gone", "count": 0}), {"count": 0})
+
+    def test_enabled_selector_key(self) -> None:
+        self.assertTrue(fast_ui.matches({"AXLabel": "Pay", "enabled": False}, {"label": "Pay", "enabled": False}))
+        self.assertFalse(fast_ui.matches({"AXLabel": "Pay", "enabled": True}, {"label": "Pay", "enabled": False}))
+        self.assertTrue(fast_ui.matches({"AXLabel": "Pay"}, {"label": "Pay", "enabled": True}))
+        self.assertEqual(fast_ui.compact_node({"AXLabel": "Pay", "enabled": False})["enabled"], False)
+        self.assertNotIn("enabled", fast_ui.compact_node({"AXLabel": "Pay", "enabled": True}))
+
+    def test_dismiss_keyboard_sends_return_until_the_keys_are_gone(self) -> None:
+        key = self.node(AXUniqueId="Return")
+        with mock.patch.object(fast_ui, "hierarchy", side_effect=[[key], []]), \
+                mock.patch.object(fast_ui, "axe") as axe, mock.patch.object(fast_ui.time, "sleep"):
+            self.run_action({"type": "dismiss_keyboard"})
+        self.assertEqual(axe.call_count, 2)
+        self.assertIn(f"key {fast_ui.KEY_CODES['return']}", axe.call_args.args)
+
+    def test_dismiss_keyboard_taps_the_named_button(self) -> None:
+        done = self.node(AXLabel="Done", frame={"x": 300, "y": 400, "width": 60, "height": 44})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[done]), \
+                mock.patch.object(fast_ui, "tap_point") as tap, mock.patch.object(fast_ui, "axe") as axe:
+            self.run_action({"type": "dismiss_keyboard", "button": "Done"})
+        tap.assert_called_once_with("SIM", 330.0, 422.0, 0.15)
+        axe.assert_not_called()
+
+    def test_pull_to_refresh_drags_down_the_screen_or_the_named_list(self) -> None:
+        app = {"AXLabel": "App", "type": "Application", "frame": {"x": 0, "y": 0, "width": 400, "height": 800}}
+        listing = self.node(AXUniqueId="feed", type="Other", frame={"x": 0, "y": 200, "width": 400, "height": 400})
+        with mock.patch.object(fast_ui, "hierarchy", return_value=[app, listing]), \
+                mock.patch.object(fast_ui, "drag") as drag:
+            self.run_action({"type": "pull_to_refresh"})
+            self.assertEqual(drag.call_args.args[1:4], ([200.0, 200.0], [200.0, 600.0], 0))
+            self.run_action({"type": "pull_to_refresh", "id": "feed"})
+            self.assertEqual(drag.call_args.args[1:3], ([200.0, 300.0], [200.0, 500.0]))
+
+    def test_new_kinds_settle_and_join_the_map(self) -> None:
+        for kind in ("set_switch", "pull_to_refresh", "tap_alert"):
+            self.assertIn(kind, fast_ui.GESTURE_KINDS)
+        self.assertIn("dismiss_keyboard", fast_ui.TRAIL_GESTURES)
+
+
+class LeaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        locks = tempfile.TemporaryDirectory()
+        self.addCleanup(locks.cleanup)
+        patcher = mock.patch.object(fast_ui, "LOCK_DIR", Path(locks.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_second_run_on_same_simulator_is_busy(self) -> None:
+        first = fast_ui.SimulatorLease("SIM", Path("a.json"))
+        first.acquire(0)
+        with self.assertRaisesRegex(fast_ui.FastUIError, r"simulator busy: SIM is running a\.json \(pid \d+"):
+            fast_ui.SimulatorLease("SIM", Path("b.json")).acquire(0)
+        with self.assertRaisesRegex(fast_ui.FastUIError, "simulator busy"):
+            fast_ui.ensure_not_busy("SIM")
+        other = fast_ui.SimulatorLease("OTHER", Path("c.json"))
+        other.acquire(0)
+        other.release(clean=True)
+        first.release(clean=True)
+        fast_ui.ensure_not_busy("SIM")
+        second = fast_ui.SimulatorLease("SIM", Path("b.json"))
+        second.acquire(0)
+        second.release(clean=True)
+
+    def test_a_clean_release_needs_no_repair(self) -> None:
+        first = fast_ui.SimulatorLease("SIM", Path("a.json"))
+        first.acquire(0)
+        first.touch("bundle_id", "com.example.app")
+        first.release(clean=True)
+        with mock.patch.object(fast_ui, "command") as command, mock.patch.object(fast_ui, "stop_stale_recorder"):
+            following = fast_ui.SimulatorLease("SIM", Path("b.json"))
+            following.acquire(0)
+            following.release(clean=True)
+        command.assert_not_called()
+        self.assertEqual(following.repaired, [])
+
+    def test_killed_run_is_repaired_by_the_next(self) -> None:
+        err = io.StringIO()
+        with mock.patch.object(fast_ui, "command") as command, \
+                mock.patch.object(fast_ui, "restore_ui_settings") as restore, \
+                mock.patch.object(fast_ui, "stop_stale_recorder"), contextlib.redirect_stderr(err):
+            killed = fast_ui.SimulatorLease("SIM", Path("a.json"))
+            killed.acquire(0)
+            killed.touch("ui", {"appearance": "light"})
+            killed.touch("bundle_id", "com.example.app")
+            killed.touch("preferences", ["isPremium"])
+            killed.release(clean=False)
+            following = fast_ui.SimulatorLease("SIM", Path("b.json"))
+            following.acquire(0)
+            following.release(clean=True)
+        issued = [call.args[0] for call in command.call_args_list]
+        restore.assert_called_once_with("SIM", {"appearance": "light"})
+        self.assertIn(["xcrun", "simctl", "terminate", "SIM", "com.example.app"], issued)
+        self.assertIn(["xcrun", "simctl", "spawn", "SIM", "defaults", "delete", "com.example.app", "isPremium"], issued)
+        self.assertEqual(following.repaired, ["ui", "bundle_id", "preferences"])
+        self.assertIn("WARN dirty=1", err.getvalue())
+
+    def test_teardown_undoes_only_what_the_run_changed(self) -> None:
+        with mock.patch.object(fast_ui, "command") as command, mock.patch.object(fast_ui, "restore_ui_settings") as restore:
+            fast_ui.teardown("SIM", "com.example.app", {"appearance": "light"}, {"isPremium": True}, False, False)
+        restore.assert_called_once_with("SIM", {"appearance": "light"})
+        self.assertEqual([call.args[0] for call in command.call_args_list], [
+            ["xcrun", "simctl", "terminate", "SIM", "com.example.app"],
+            ["xcrun", "simctl", "spawn", "SIM", "defaults", "delete", "com.example.app", "isPremium"],
+        ])
+        with mock.patch.object(fast_ui, "command") as command, mock.patch.object(fast_ui, "restore_ui_settings"):
+            fast_ui.teardown("SIM", "com.example.app", {}, {"isPremium": True}, True, False)
+        self.assertEqual(command.call_args_list[-1].args[0],
+                         ["xcrun", "simctl", "spawn", "SIM", "defaults", "delete", "com.example.app"])
+        with mock.patch.object(fast_ui, "command") as command, mock.patch.object(fast_ui, "restore_ui_settings") as restore:
+            fast_ui.teardown("SIM", "com.example.app", {"appearance": "light"}, {"isPremium": True}, False, True)
+        command.assert_not_called()
+        restore.assert_called_once()
+
+
+class RunLifecycleTests(unittest.TestCase):
+    """main() with a lease: one run per simulator, and what a run changed is undone."""
+
+    TREE = json.dumps([{"type": "Application", "AXLabel": "Demo", "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+                        "children": [{"type": "Button", "AXLabel": "Go", "frame": {"x": 10, "y": 100, "width": 80, "height": 40}}]}])
+
+    def setUp(self) -> None:
+        locks = tempfile.TemporaryDirectory()
+        self.addCleanup(locks.cleanup)
+        patcher = mock.patch.object(fast_ui, "LOCK_DIR", Path(locks.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_main(self, actions: list, setup: dict | None = None, argv: tuple[str, ...] = (),
+                 axe: object = None) -> tuple[int, list[list[str]], str, str]:
+        with tempfile.TemporaryDirectory() as raw:
+            flow = Path(raw) / "home.json"
+            flow.write_text(json.dumps({"version": 1, "name": "home", "actions": actions, "setup": setup or {},
+                                        "app": {"bundle_id": "com.example.app", "prebuilt": True, "simulator": "SIM",
+                                                "project_root": raw}}))
+            calls: list[list[str]] = []
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow), *argv]), \
+                    mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
+                    mock.patch.object(fast_ui, "command", side_effect=lambda args, **_: calls.append(args) or
+                                      subprocess.CompletedProcess(args, 0, "", "")), \
+                    mock.patch.object(fast_ui, "record"), mock.patch.object(fast_ui, "screenshot"), \
+                    mock.patch.object(fast_ui, "axe", side_effect=axe or FakeAxe(self.TREE)), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = fast_ui.main()
+        return code, calls, out.getvalue(), err.getvalue()
+
+    def test_busy_simulator_is_refused_before_anything_runs(self) -> None:
+        holder = fast_ui.SimulatorLease("SIM", Path("other.json"))
+        holder.acquire(0)
+        self.addCleanup(holder.release, True)
+        code, calls, _, err = self.run_main([{"type": "wait", "label": "Go"}])
+        self.assertEqual(code, 3)
+        self.assertIn("BUSY task=home error=simulator busy: SIM is running other.json", err)
+        self.assertEqual(calls, [])
+
+    def test_pass_terminates_the_app_and_deletes_seeded_keys(self) -> None:
+        code, calls, out, _ = self.run_main([{"type": "wait", "label": "Go"}],
+                                            {"fresh_install": False, "preferences": {"isPremium": True}})
+        self.assertEqual(code, 0, out)
+        self.assertIn(["xcrun", "simctl", "launch", "--terminate-running-process", "SIM", "com.example.app"], calls)
+        self.assertEqual(calls[-2:], [
+            ["xcrun", "simctl", "terminate", "SIM", "com.example.app"],
+            ["xcrun", "simctl", "spawn", "SIM", "defaults", "delete", "com.example.app", "isPremium"],
+        ])
+        # The lease was released clean: the next run takes it and repairs nothing.
+        following = fast_ui.SimulatorLease("SIM", Path("next.json"))
+        following.acquire(0)
+        self.assertEqual(following.repaired, [])
+        following.release(clean=True)
+
+    def test_relaunch_false_keeps_a_running_app(self) -> None:
+        _, calls, _, _ = self.run_main([{"type": "wait", "label": "Go"}], {"fresh_install": False, "relaunch": False})
+        self.assertIn(["xcrun", "simctl", "launch", "SIM", "com.example.app"], calls)
+
+    def test_keep_state_leaves_the_app_running(self) -> None:
+        _, calls, _, _ = self.run_main([{"type": "wait", "label": "Go"}], {"fresh_install": False}, ("--keep-state",))
+        self.assertNotIn(["xcrun", "simctl", "terminate", "SIM", "com.example.app"], calls)
+
+    def test_sigterm_mid_flow_still_tears_down(self) -> None:
+        tree = FakeAxe(self.TREE)
+
+        def axe(*args: str, **kwargs: object) -> object:
+            if "touch" in args:
+                fast_ui.raise_interrupted(fast_ui.signal.SIGTERM, None)
+            return tree(*args, **kwargs)
+
+        self.addCleanup(fast_ui.signal.signal, fast_ui.signal.SIGINT, fast_ui.signal.default_int_handler)
+        code, calls, _, err = self.run_main([{"type": "tap_label", "label": "Go"}, {"type": "wait", "label": "Never"}],
+                                            {"fresh_install": False, "preferences": {"isPremium": True}}, axe=axe)
+        self.assertEqual(code, 130)
+        self.assertIn("INTERRUPTED task=home step=01_tap_label", err)
+        self.assertIn("error=interrupted by SIGTERM", err)
+        self.assertIn(["xcrun", "simctl", "terminate", "SIM", "com.example.app"], calls)
+        self.assertIn(["xcrun", "simctl", "spawn", "SIM", "defaults", "delete", "com.example.app", "isPremium"], calls)
+        fast_ui.ensure_not_busy("SIM")
+
+    def test_do_refuses_a_simulator_a_flow_holds(self) -> None:
+        holder = fast_ui.SimulatorLease("SIM", Path("other.json"))
+        holder.acquire(0)
+        self.addCleanup(holder.release, True)
+        err = io.StringIO()
+        with mock.patch.object(fast_ui, "axe") as axe, contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = fast_ui.run_do(['{"type":"tap_label","label":"Go"}', "--simulator", "SIM"])
+        self.assertEqual(code, 1)
+        self.assertIn("simulator busy", err.getvalue())
+        axe.assert_not_called()
 
 
 class DeviceLauncherTests(unittest.TestCase):

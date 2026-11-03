@@ -298,7 +298,7 @@ class EngineTests(Base):
         with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow), *argv]), \
                 mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
                 mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "apply_ui_settings"), \
-                mock.patch.object(fast_ui, "set_preferences"), mock.patch.object(fast_ui, "reset_preferences"), \
+                mock.patch.object(fast_ui, "set_preferences"), \
                 mock.patch.object(fast_ui, "restore_ui_settings"), mock.patch.object(fast_ui, "record"), \
                 mock.patch.object(fast_ui, "clear_prompts"), mock.patch.object(fast_ui, "screenshot", side_effect=shot), \
                 mock.patch.object(fast_ui, "axe", side_effect=fixtures.FakeAxe(fixtures.SimulatorTrailTests.A)), \

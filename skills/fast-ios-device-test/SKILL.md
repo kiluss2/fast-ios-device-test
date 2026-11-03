@@ -118,8 +118,16 @@ launch) and print one PASS/FAIL line with the visible labels after the actions.
   (max 2.5 s) — use it on screens that keep animating, not by default.
 - "Must not show" → `assert_absent` (`seconds` ≤ 8); "closes" → `wait_absent`. A successful
   tap proves nothing about absence.
-- Fresh install wipes the defaults domain, and the engine removes seeded preferences after every
-  run (`--keep-state` to inspect). Seed Codable values as `{"$json_data": …}`.
+- Fresh install wipes the defaults domain, and the engine undoes what a run changed (seeded
+  preferences, appearance, text size; the app is terminated) even when the run is interrupted
+  (`--keep-state` to inspect). One run per simulator: a second one prints `BUSY` (exit 3) and a
+  `do` on it fails with `simulator busy`. Seed Codable values as `{"$json_data": …}`.
+- Prove state with checks, not with a tap that happened to work: `assert_value` (`equals`,
+  `contains`, `matches`), `assert_count` (`count`, `min`, `max`), the selector key `enabled`.
+  Switches: `set_switch` `on` (touches only when needed). Alerts: `tap_alert` `button`, with
+  `"system": true, "optional": true` for a permission prompt that may not come again.
+- Test builds skip SwiftLint (`lint=shimmed`); `"skip_lint": false` in `app` lints. A failed
+  build names the phase and its first `error:` line.
 - Apple's own sheets are not in the accessibility tree: prove them with `screenshot`, and close
   one that blocks the flow (the App Store review sheet) with `tap_point`.
 - `open_url` delivers a link with no prompt. A link tapped in Safari asks "Open in …?": that flow

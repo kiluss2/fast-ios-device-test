@@ -1,0 +1,6 @@
+#!/bin/sh
+# fastSimulatorTest and fastDeviceTest put this directory first on PATH for test builds, so a
+# `swiftlint` run-script phase that finds the tool through PATH does nothing.
+# Set "skip_lint": false in the flow's app block (or FAST_UI_SKIP_LINT=0) to lint.
+echo "note: swiftlint skipped by fast-ios-device-test (skip_lint)"
+exit 0

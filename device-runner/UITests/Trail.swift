@@ -31,7 +31,7 @@ struct Trail {
         "tap_label", "tap_first", "tap_nearest", "tap_point", "long_press", "swipe", "scroll_to",
         "type_text", "launch", "activate", "terminate", "open_url", "double_tap", "drag", "edge_swipe", "pinch",
         "rotate", "orientation", "press_key", "press_button", "set_slider", "set_picker", "shake", "two_finger_tap",
-        "two_finger_drag", "key_combo", "clear_text",
+        "two_finger_drag", "key_combo", "clear_text", "pull_to_refresh", "set_switch", "tap_alert", "dismiss_keyboard",
     ]
     static let interactiveTypes = keptTypes.subtracting(["StaticText", "Heading"])
     static let gestureKeys = [

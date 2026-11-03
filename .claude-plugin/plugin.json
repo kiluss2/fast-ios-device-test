@@ -1,6 +1,6 @@
 {
   "name": "fast-ios-device-test",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Fast iOS verification for Claude Code: /fastSimulatorTest drives Simulator UI flows (with per-simulator fan-out, system and prebuilt apps), /fastDeviceTest runs the same flows on a physical iPhone and records its screen, both with taps, holds, drags, edge swipes, keys, pinch and more; fastUIMap prints the screen map earlier runs recorded; /fastUIReview reviews recorded runs; every passing flow run is filed as PR evidence (a captioned sheet, light clips) in a per-ticket folder on the Desktop.",
   "author": {
     "name": "DungVC"

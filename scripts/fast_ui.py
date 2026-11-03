@@ -63,7 +63,8 @@ class Metrics:
 
 
 def command(
-    args: list[str], *, check: bool = True, timeout: float | None = None
+    args: list[str], *, check: bool = True, timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         args,
@@ -71,6 +72,7 @@ def command(
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
@@ -152,6 +154,8 @@ def compact_node(node: dict[str, Any]) -> dict[str, Any]:
         value = node.get(source)
         if value not in (None, ""):
             compact[key] = str(value) if key != "type" else value
+    if node.get("enabled") is False:
+        compact["enabled"] = False
     frame = node.get("frame") or {}
     try:
         box = {name: round(float(frame[name]), 1) for name in ("x", "y", "width", "height")}
@@ -229,6 +233,60 @@ def node_type(node: dict[str, Any]) -> str | None:
     return node.get("type") or node.get("AXRole")
 
 
+ALERT_TYPES = ("Sheet", "Alert")
+
+
+def inside(node: dict[str, Any], container: dict[str, Any]) -> bool:
+    inner, outer = node.get("frame") or {}, container.get("frame") or {}
+    try:
+        return (
+            float(outer["x"]) <= float(inner["x"]) and float(outer["y"]) <= float(inner["y"])
+            and float(inner["x"]) + float(inner["width"]) <= float(outer["x"]) + float(outer["width"])
+            and float(inner["y"]) + float(inner["height"]) <= float(outer["y"]) + float(outer["height"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def alert_sheets(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Alert containers on screen. AXe on iOS 27 reports both a UIAlertController and a
+    SwiftUI `.alert` as a Sheet whose buttons sit inside its frame."""
+    return [node for node in nodes if node_type(node) in ALERT_TYPES and tappable(node)]
+
+
+def on_app_screen(nodes: list[dict[str, Any]]) -> bool:
+    """The tree is the app's own: its root Application carries the app's name. While a system
+    alert is up, describe-ui returns SpringBoard's tree, whose root label is blank (" ")."""
+    return bool(nodes) and node_type(nodes[0]) == "Application" and bool(str(nodes[0].get("AXLabel") or "").strip())
+
+
+def system_alert(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The system alert (permission prompt, SpringBoard alert) covering the app, if any.
+    Measured on iOS 27 / AXe: an in-app alert has the same Sheet > … > Button shape but sits
+    under the app's root (label = app name)."""
+    if not nodes or node_type(nodes[0]) != "Application" or on_app_screen(nodes):
+        return None
+    sheets = alert_sheets(nodes)
+    return sheets[0] if sheets else None
+
+
+# Prompts the optional_permission_labels auto-tap dismissed in this run: {"alert", "button"}.
+AUTO_TAPPED: list[dict[str, str]] = []
+
+
+def alert_button(
+    nodes: list[dict[str, Any]], label: str, system_only: bool
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """(button, its alert) for a Button labelled `label` inside an alert; a same-named
+    button in the app's own layout (no alert around it) never matches."""
+    sheets = [sheet for sheet in [system_alert(nodes)] if sheet] if system_only else alert_sheets(nodes)
+    for sheet in sheets:
+        for node in nodes:
+            if node.get("AXLabel") == label and node_type(node) == "Button" and tappable(node) and inside(node, sheet):
+                return node, sheet
+    return None
+
+
 def typed_labels(nodes: list[dict[str, Any]], limit: int = 25) -> list[str]:
     """`visible_labels` with the element type beside each label: a flow author sees at
     once that "Add Widget" is a StaticText, which `tap_label` (Button) never matches."""
@@ -265,7 +323,7 @@ def selector_hints(selector: dict[str, Any], nodes: list[dict[str, Any]]) -> str
     return f"; closest labels: [{', '.join(close[:3])}]" if close else ""
 
 
-SELECTOR_KEYS = ("label", "label_contains", "label_is_empty", "id", "value", "element_type", "frame")
+SELECTOR_KEYS = ("label", "label_contains", "label_is_empty", "id", "value", "element_type", "enabled", "frame")
 
 
 def selector_of(action: dict[str, Any], default_type: str | None = None) -> dict[str, Any]:
@@ -293,6 +351,9 @@ def matches(node: dict[str, Any], selector: dict[str, Any]) -> bool:
         return False
     expected_type = selector.get("element_type")
     if expected_type is not None and node_type(node) != expected_type:
+        return False
+    enabled = selector.get("enabled")
+    if enabled is not None and bool(node.get("enabled", True)) != bool(enabled):
         return False
     frame = node.get("frame") or {}
     limits = selector.get("frame") or {}
@@ -345,6 +406,10 @@ def prompt_target(nodes: list[dict[str, Any]], entries: list[Any]) -> dict[str, 
         if choice is not None:
             return next(button for button in own if button.get("AXLabel") == choice)
     labels = [entry for entry in entries if isinstance(entry, str)]
+    if on_app_screen(nodes):
+        # The app's own screen: an "Allow" or "OK" outside a sheet there is the app's UI,
+        # never a prompt. See system_alert.
+        return None
     return next(
         (button for button in buttons
          if button.get("AXLabel") in labels and not any(button is other for other in in_sheets)),
@@ -361,6 +426,12 @@ def within(node: dict[str, Any], frame: dict[str, Any]) -> bool:
         return False
 
 
+PROMPT_GRACE = 4.0
+# Prompt taps one wait makes: a few prompts can follow each other (notifications, then
+# tracking), but a button that stays after its tap must not keep the wait alive forever.
+PROMPT_TAPS = 4
+
+
 def wait_nodes(
     udid: str,
     predicate: Callable[[list[dict[str, Any]]], bool],
@@ -371,12 +442,20 @@ def wait_nodes(
     deadline = time.perf_counter() + timeout
     nodes: list[dict[str, Any]] = []
     max_age = first_poll_max_age
+    prompt_taps = 0
     while time.perf_counter() < deadline:
         nodes = hierarchy(udid, max_age)
         max_age = 0.0
         prompt = prompt_target(nodes, optional_prompt_labels or [])
-        if prompt is not None:
+        if prompt is not None and prompt_taps < PROMPT_TAPS:
+            prompt_taps += 1
             tap_point(udid, *frame_center(prompt), 0.08)
+            sheet = next((sheet for sheet in alert_sheets(nodes) if inside(prompt, sheet)), {})
+            AUTO_TAPPED.append({"alert": str(sheet.get("AXLabel") or ""), "button": str(prompt.get("AXLabel"))})
+            invalidate_hierarchy(udid)
+            # Dismissing a permission alert is not progress toward the selector: under load one
+            # describe-ui can take 10 s+, so keep a few seconds to see the screen behind it.
+            deadline = max(deadline, time.perf_counter() + PROMPT_GRACE)
             continue
         if predicate(nodes):
             return nodes
@@ -770,6 +849,148 @@ def stop_stale_recorder(udid: str) -> None:
     command(["pkill", "-INT", "-f", f"simctl io {udid} recordVideo"], check=False)
 
 
+class Interrupted(Exception):
+    """SIGTERM/SIGHUP arrived; raised from the handler so teardown still runs."""
+
+
+def raise_interrupted(signum: int, _frame: Any) -> None:
+    # A second signal during teardown must not cut the undo short.
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted(f"interrupted by {signal.Signals(signum).name}")
+
+
+LOCK_DIR = Path(os.environ.get("FAST_UI_LOCK_DIR") or Path.home() / "Library/Caches/fast-ui/locks")
+
+
+class SimulatorLease:
+    """Per-UDID flock plus a journal of what this run changed on the simulator.
+
+    The journal is rewritten whenever the run touches simulator-wide state, and `dirty` is
+    cleared only once teardown finished. A run killed with SIGKILL keeps dirty=1, so the next
+    run on that simulator repairs from the journal first."""
+
+    def __init__(self, udid: str, flow: Path) -> None:
+        self.udid = udid
+        self.flow = flow
+        self.path = LOCK_DIR / f"{udid}.lock"
+        self.handle: Any = None
+        self.journal: dict[str, Any] = {}
+        self.repaired: list[str] = []
+
+    def acquire(self, wait: float) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+", encoding="utf-8")
+        deadline = time.perf_counter() + wait
+        while True:
+            try:
+                fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.perf_counter() >= deadline:
+                    holder = self.read()
+                    self.handle.close()
+                    self.handle = None
+                    # The holder may not have written its journal yet (it just took the lock).
+                    who = (f"{holder['flow']} (pid {holder.get('pid')}, since {holder.get('started')})"
+                           if holder.get("pid") else "another fastSimulatorTest run")
+                    raise FastUIError(
+                        f"simulator busy: {self.udid} is running {who}; "
+                        "wait for it, set FAST_UI_LOCK_WAIT=<seconds>, or use another simulator"
+                    ) from None
+                time.sleep(0.5)
+        previous = self.read()
+        if previous.get("dirty"):
+            self.repair(previous)
+        self.journal = {
+            "pid": os.getpid(), "flow": str(self.flow),
+            "started": datetime.now().isoformat(timespec="seconds"), "dirty": 1,
+        }
+        self.save()
+
+    def read(self) -> dict[str, Any]:
+        try:
+            self.handle.seek(0)
+            return json.loads(self.handle.read() or "{}")
+        except (OSError, ValueError):
+            return {}
+
+    def save(self) -> None:
+        if self.handle is None:
+            return
+        self.handle.seek(0)
+        self.handle.truncate()
+        self.handle.write(json.dumps(self.journal) + "\n")
+        self.handle.flush()
+
+    def touch(self, key: str, value: Any = True) -> None:
+        if self.journal.get(key) != value:
+            self.journal[key] = value
+            self.save()
+
+    def repair(self, previous: dict[str, Any]) -> None:
+        """Undo what a killed run recorded; best effort, every step independent."""
+        udid = self.udid
+        stop_stale_recorder(udid)
+        if previous.get("ui"):
+            restore_ui_settings(udid, previous["ui"])
+        bundle_id = previous.get("bundle_id")
+        if bundle_id:
+            command(["xcrun", "simctl", "terminate", udid, bundle_id], check=False)
+            for key in previous.get("preferences") or []:
+                command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id, key], check=False)
+        self.repaired = [key for key in ("ui", "bundle_id", "preferences") if previous.get(key)]
+        print(
+            f"WARN dirty=1: previous run pid {previous.get('pid', '?')} ({previous.get('flow', '?')}) "
+            f"was killed before teardown; repaired {', '.join(self.repaired) or 'recorder'}",
+            file=sys.stderr,
+        )
+
+    def release(self, clean: bool) -> None:
+        if self.handle is None:
+            return
+        if clean:
+            self.journal["dirty"] = 0
+            self.save()
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
+        self.handle = None
+
+
+def ensure_not_busy(udid: str) -> None:
+    """A `do` step must not drive a simulator that a flow run currently holds."""
+    path = LOCK_DIR / f"{udid}.lock"
+    if not path.exists():
+        return
+    with path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise FastUIError(f"simulator busy: {udid} is running a fastSimulatorTest flow; wait for it") from None
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def teardown(
+    udid: str, bundle_id: str, previous_ui: dict[str, str], preferences: dict[str, Any],
+    fresh_install: bool, keep_state: bool,
+) -> None:
+    """Undo what this run changed: the appearance and text size it set, and unless
+    --keep-state, the app left running on whatever screen the flow ended and the seeded keys."""
+    restore_ui_settings(udid, previous_ui)
+    if keep_state:
+        return
+    # The next run (or a person using the simulator) would otherwise start from that screen.
+    command(["xcrun", "simctl", "terminate", udid, bundle_id], check=False)
+    # Seeded keys (e.g. isPremium to hide the paywall) live in the simulator's user domain and
+    # would otherwise stay active for ordinary app runs after the test.
+    if preferences:
+        if fresh_install:
+            command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id], check=False)
+        else:
+            for key in preferences:
+                command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id, key], check=False)
+
+
 class Recorder:
     """Records the simulator screen with `simctl io recordVideo` for one run."""
 
@@ -937,6 +1158,139 @@ def prepare_app(app: dict[str, Any], base: Path, udid: str, reuse_app: bool) -> 
         return build_if_needed(app, base, udid, app_path, derived_data)
 
 
+SHIM_DIR = Path(__file__).resolve().parent / "shims"
+# Exported to sh/bash run-script phases as a function named `swiftlint`: a function wins over
+# PATH, so it also covers a phase that puts /opt/homebrew/bin ahead of the shim first
+# (SwiftLint's README form). zsh phases import no functions and keep only the PATH shim.
+SWIFTLINT_FUNCTION = "() { echo 'note: swiftlint skipped by fastSimulatorTest (skip_lint)'; return 0; }"
+FUNCTION_SHELLS = ("/bin/sh", "/bin/bash", "/usr/bin/env bash", "/usr/bin/env sh")
+SCRIPT_PHASE = re.compile(r"isa = PBXShellScriptBuildPhase;(?P<body>.*?)\n\t\t\};", re.S)
+# A PATH assignment whose value does not start with $PATH puts its own directory
+# ahead of the shim (SwiftLint's README form: export PATH="/opt/homebrew/bin:$PATH").
+PATH_PREPEND = re.compile(r"\bPATH=(?![\"']?\$\{?PATH\b)")
+EXPLICIT_SWIFTLINT = re.compile(r"[^\s;&|\"'`]*/swiftlint\b")
+
+
+def lint_skip_env(env: dict[str, str]) -> dict[str, str]:
+    """`env` with SwiftLint turned into a no-op for the run-script phases of a build."""
+    return {
+        **env,
+        "PATH": f"{SHIM_DIR}{os.pathsep}{env.get('PATH', '')}",
+        "BASH_FUNC_swiftlint%%": SWIFTLINT_FUNCTION,
+    }
+
+
+def skip_lint_enabled(app: dict[str, Any]) -> bool:
+    """SwiftLint is skipped in test builds unless the flow's app says `"skip_lint": false`;
+    FAST_UI_SKIP_LINT=0/1 overrides both."""
+    override = os.environ.get("FAST_UI_SKIP_LINT")
+    if override is not None:
+        return override not in ("0", "false", "no", "")
+    return bool(app.get("skip_lint", True))
+
+
+def project_files(project: Path) -> list[Path]:
+    """The project.pbxproj files of a project, or of every project a workspace lists."""
+    if project.suffix == ".xcodeproj":
+        return [project / "project.pbxproj"] if (project / "project.pbxproj").exists() else []
+    contents = project / "contents.xcworkspacedata"
+    found: list[Path] = []
+    if contents.exists():
+        text = contents.read_text(errors="replace")
+        for location in re.findall(r'location = "(?:group|container|absolute):([^"]+\.xcodeproj)"', text):
+            path = Path(location) if location.startswith("/") else project.parent / location
+            if (path / "project.pbxproj").exists():
+                found.append(path / "project.pbxproj")
+    return found
+
+
+def pbx_string(body: str, key: str) -> str:
+    match = re.search(key + r' = (?:"((?:[^"\\]|\\.)*)"|([^;\s]+));', body)
+    if not match:
+        return ""
+    if match.group(2) is not None:
+        return match.group(2)
+    return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), match.group(1))
+
+
+def lint_phases(project: Path) -> Iterator[tuple[str, str, str]]:
+    """(name, shell, script without comment lines) of each run-script phase that runs SwiftLint."""
+    for pbxproj in project_files(project):
+        for match in SCRIPT_PHASE.finditer(pbxproj.read_text(errors="replace")):
+            body = match.group("body")
+            script = pbx_string(body, "shellScript")
+            code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+            if re.search(r"\bswiftlint\b", code, re.I):
+                yield pbx_string(body, "name") or "Run Script", pbx_string(body, "shellPath") or "/bin/sh", code
+
+
+def lint_phase_names(project: Path) -> list[str]:
+    return [name for name, _, _ in lint_phases(project)]
+
+
+def lint_report(project: Path) -> tuple[str, list[str]]:
+    """Classify SwiftLint in the project: none, shimmed (the shim neutralises every lint
+    phase) or not-shimmable (some phase or a build-tool plugin bypasses it)."""
+    shimmed: list[str] = []
+    blocked: list[str] = []
+    for pbxproj in project_files(project):
+        if re.search(r"SwiftLint(?:BuildTool)?Plugin", pbxproj.read_text(errors="replace")):
+            blocked.append(f"{pbxproj.parent.stem}: SwiftLint build-tool plugin")
+    for name, shell, code in lint_phases(project):
+        explicit = EXPLICIT_SWIFTLINT.search(code)
+        if explicit:
+            blocked.append(f"'{name}': runs {explicit.group(0)} by path")
+        elif re.search(r"\bmint\s+run\b", code):
+            blocked.append(f"'{name}': runs swiftlint through mint")
+        elif PATH_PREPEND.search(code) and shell not in FUNCTION_SHELLS:
+            blocked.append(f"'{name}': prepends to PATH before swiftlint in a shell that imports no functions")
+        else:
+            shimmed.append(name)
+    if blocked:
+        return "not-shimmable", blocked
+    return ("shimmed", shimmed) if shimmed else ("none", [])
+
+
+def build_failure(output: str, lint_state: str, lint_names: list[str]) -> str:
+    """Name the failing build command and its first `error:` line instead of the last lines
+    of the log (which are only the command list and BUILD FAILED)."""
+    lines = output.splitlines()
+    failed: list[str] = []
+    marker = next((i for i, line in enumerate(lines) if "The following build commands failed:" in line), None)
+    if marker is not None:
+        for line in lines[marker + 1:]:
+            line = line.strip()
+            if not line or line.startswith("(") and "failure" in line:
+                break
+            phase = re.match(r"PhaseScriptExecution (.+?) /", line)
+            failed.append(f"run-script phase '{phase.group(1).replace(chr(92) + ' ', ' ')}'" if phase
+                          else line.split(" /")[0])
+    errors = [line.strip() for line in lines
+              if re.search(r"(^|: )error: ", line) and "The following build commands failed" not in line]
+    errors = [error for error in errors if not error.startswith("error: Command PhaseScriptExecution failed")] or errors
+    # xcodebuild -quiet drops the "build commands failed" list; SwiftLint's own summary line
+    # and its "Violation: ... (rule_id)" errors still identify it.
+    serious = re.search(r"Done linting! Found \d+ violations?, (\d+) serious", output)
+    if not failed and ((serious and int(serious.group(1)) > 0)
+                       or any(re.search(r"Violation: .*\(\w+\)$", error) for error in errors)):
+        failed.append("SwiftLint" + (f" (run-script phase {', '.join(repr(n) for n in lint_names)})" if lint_names else ""))
+    parts = ["build failed"]
+    if failed:
+        parts.append("in " + ", ".join(dict.fromkeys(failed)))
+    if errors:
+        more = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+        parts.append(f"first error: {errors[0][:300]}{more}")
+    else:
+        parts.append("| " + " | ".join(line.strip() for line in lines[-6:] if line.strip()))
+    if any("swiftlint" in item.lower() for item in failed + errors):
+        parts.append(
+            "hint: the lint phase calls swiftlint by path or prepends to PATH, so skip_lint cannot bypass it; "
+            "fix the violation or make the phase call plain `swiftlint`" if lint_state == "not-shimmable"
+            else "hint: remove \"skip_lint\": false / FAST_UI_SKIP_LINT=0 to skip SwiftLint in test builds"
+        )
+    return " ".join(parts)
+
+
 def build_if_needed(
     app: dict[str, Any], base: Path, udid: str, app_path: Path, derived_data: Path
 ) -> tuple[Path, bool]:
@@ -962,10 +1316,24 @@ def build_if_needed(
     ]
     if app.get("configuration"):
         build[6:6] = ["-configuration", app["configuration"]]
-    result = command(build, check=False, timeout=float(app.get("build_timeout", 300)))
+    env = dict(os.environ)
+    lint_state, lint_detail = lint_report(project)
+    if skip_lint_enabled(app):
+        # Xcode keeps the caller's environment for run-script phases, so a phase that calls
+        # plain `swiftlint` runs the no-op function, or else finds the no-op shim first.
+        env = lint_skip_env(env)
+    elif lint_state != "none":
+        lint_state = "on"
+    if lint_state != "none":
+        print(f"lint={lint_state}" + (f" ({'; '.join(lint_detail)})" if lint_detail else ""), file=sys.stderr)
+    result = command(build, check=False, timeout=float(app.get("build_timeout", 300)), env=env)
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout).strip().splitlines()[-8:]
-        raise FastUIError("incremental build failed: " + " | ".join(tail))
+        # -quiet prints the errors on stdout, so read both streams; keep the whole log.
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        log = derived_data / ".fastui-build.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(output, encoding="utf-8")
+        raise FastUIError(f"{build_failure(output, lint_state, lint_phase_names(project))} log={file_link(log)}")
     verify_app(app_path, required(app, "bundle_id", "app"))
     fingerprint_after = build_fingerprint(app, base)
     if fingerprint_after == fingerprint_before:
@@ -998,19 +1366,6 @@ def set_preferences(udid: str, bundle_id: str, preferences: dict[str, Any]) -> N
         return
     for key, value in preferences.items():
         write_preference(udid, bundle_id, key, value)
-
-
-def reset_preferences(udid: str, bundle_id: str, preferences: dict[str, Any], fresh_install: bool) -> None:
-    # Seeded keys (e.g. isPremium to hide the paywall) live in the simulator's user
-    # domain and would otherwise stay active for ordinary app runs after the test.
-    if not preferences:
-        return
-    command(["xcrun", "simctl", "terminate", udid, bundle_id], check=False)
-    if fresh_install:
-        command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id], check=False)
-        return
-    for key in preferences:
-        command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id, key], check=False)
 
 
 def sort_nodes(nodes: list[dict[str, Any]], keys: list[str]) -> list[dict[str, Any]]:
@@ -1054,13 +1409,13 @@ def motion_ratio(first: Path, second: Path, region: list[float], threshold: int)
 
 GESTURE_KINDS = {
     "tap_label", "tap_first", "tap_nearest", "tap_point", "long_press", "double_tap", "drag", "edge_swipe", "swipe",
-    "scroll_to",
+    "scroll_to", "pull_to_refresh", "set_switch", "tap_alert",
 }
 # Steps the screen map records as a way from one screen to the next.
 TRAIL_GESTURES = GESTURE_KINDS | {
     "type_text", "launch", "activate", "terminate", "open_url", "double_tap", "drag", "edge_swipe", "pinch", "rotate",
     "orientation", "press_key", "press_button", "set_slider", "set_picker", "shake", "two_finger_tap", "two_finger_drag",
-    "key_combo", "clear_text",
+    "key_combo", "clear_text", "dismiss_keyboard",
 }
 # HID keycodes for `press_key` and `key_combo` (AXe on the Simulator).
 KEY_CODES = {
@@ -1090,6 +1445,153 @@ def hid_code(key: Any) -> int:
     if len(name) == 1 and name.isdigit():
         return 39 if name == "0" else 29 + int(name)
     raise FastUIError(f"key must be a letter, a digit or one of {', '.join(KEY_CODES)}, not {key!r}")
+
+
+def ax_text(node: dict[str, Any], key: str = "AXValue") -> str:
+    """An AX attribute as text. AXe sends numbers as numbers, and `value or ""` would turn
+    a switch's 0 into an empty string."""
+    value = node.get(key)
+    return "" if value is None else str(value)
+
+
+def has_selector(action: dict[str, Any]) -> bool:
+    return any(key in action for key in SELECTOR_KEYS)
+
+
+def on_screen_first(candidates: list[dict[str, Any]], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`candidates` with the ones whose centre is on screen first: in a scrolled list a match
+    above the screen (y < 0) sorts first, and a touch there misses."""
+    x0, y0, width, height = screen_box(nodes)
+    if not width or not height:
+        return candidates
+
+    def visible(node: dict[str, Any]) -> bool:
+        try:
+            x, y = frame_center(node)
+        except FastUIError:
+            return False
+        return x0 <= x <= x0 + width and y0 <= y <= y0 + height
+
+    return [node for node in candidates if visible(node)] + [node for node in candidates if not visible(node)]
+
+
+def resolve_node(
+    udid: str, selector: dict[str, Any], timeout: float, optional_prompt_labels: list[str],
+    accept: Callable[[dict[str, Any]], bool] = lambda node: True,
+) -> dict[str, Any]:
+    """The top-left node on screen matching `selector` (and `accept`), waiting for it like `wait`."""
+    def found(node: dict[str, Any]) -> bool:
+        return matches(node, selector) and tappable(node) and accept(node)
+
+    nodes = wait_selector(
+        udid, selector, timeout, optional_prompt_labels,
+        predicate=lambda value: any(found(node) for node in value),
+        first_poll_max_age=HIERARCHY_REUSE,
+    )
+    return on_screen_first(sort_nodes([node for node in nodes if found(node)], ["y", "x"]), nodes)[0]
+
+
+# AXe reports a UISwitch as CheckBox on iOS 27 and as Switch before it.
+SWITCH_TYPES = ("Switch", "CheckBox")
+# Measured on Xcode 27.0: the iOS 27 switch ignores AXe's taps, even `--tap-style physical`,
+# and flips only for a touch held about this long (0.1 s did nothing).
+SWITCH_PRESS = 0.3
+SWITCH_RETRY = 2.0
+
+
+def is_switch(node: dict[str, Any]) -> bool:
+    return node_type(node) in SWITCH_TYPES and ax_text(node) in ("0", "1")
+
+
+def switch_point(node: dict[str, Any]) -> tuple[float, float]:
+    """A SwiftUI Toggle spans its whole row and only flips when the switch itself is hit,
+    so a wide switch is touched near its trailing edge."""
+    frame = node.get("frame") or {}
+    x, y = frame_center(node)
+    width = float(frame.get("width", 0))
+    if width > 120:
+        x = float(frame["x"]) + width - 36
+    return x, y
+
+
+def deduped(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One node per on-screen box: AX trees nest a text in containers with the same frame."""
+    seen: set[tuple[Any, ...]] = set()
+    unique = []
+    for node in nodes:
+        frame = node.get("frame") or {}
+        key = tuple(round(float(frame.get(name, 0) or 0)) for name in ("x", "y", "width", "height"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(node)
+    return unique
+
+
+def check_text(actual: str, action: dict[str, Any], context: str) -> str | None:
+    """Why `actual` fails the action's `equals`/`not_equals`/`contains`/`matches`; None when it passes."""
+    checks = [key for key in ("equals", "not_equals", "contains", "matches") if key in action]
+    if not checks:
+        raise FastUIError(f"{context} needs equals, not_equals, contains or matches")
+    for key in checks:
+        expected = str(action[key])
+        if key == "equals" and actual != expected:
+            return f"is '{actual}', expected '{expected}'"
+        if key == "not_equals" and actual == expected:
+            return f"is still '{actual}'"
+        if key == "contains" and expected not in actual:
+            return f"is '{actual}', expected it to contain '{expected}'"
+        if key == "matches" and not re.search(expected, actual):
+            return f"is '{actual}', expected it to match /{expected}/"
+    return None
+
+
+def count_failure(count: int, action: dict[str, Any]) -> str | None:
+    if "count" in action and count != int(action["count"]):
+        return f"expected {int(action['count'])}"
+    if "min" in action and count < int(action["min"]):
+        return f"expected at least {int(action['min'])}"
+    if "max" in action and count > int(action["max"]):
+        return f"expected at most {int(action['max'])}"
+    return None
+
+
+def poll_until(udid: str, check: Callable[[list[dict[str, Any]]], str | None], timeout: float,
+               optional_prompt_labels: list[str]) -> None:
+    """Re-read the tree until `check` returns None; its last complaint becomes the failure."""
+    complaint: list[str | None] = [None]
+
+    def passes(nodes: list[dict[str, Any]]) -> bool:
+        complaint[0] = check(nodes)
+        return complaint[0] is None
+
+    try:
+        wait_nodes(udid, passes, timeout, optional_prompt_labels)
+    except FastUIError as error:
+        labels = str(error).split("visible labels:")[-1].strip()
+        reason = complaint[0] or "a declared permission prompt kept covering the screen"
+        raise FastUIError(f"{reason} after {timeout:g}s; visible labels: {labels}") from None
+
+
+# A key is dropped when AXe exits right after sending it, and also when it is the first thing
+# a new AXe session sends after another one typed. Measured on Xcode 27.0 (two Backspaces after
+# `axe type`): a lone `axe key` deleted nothing, a batch with a sleep on both sides 5/5.
+KEY_SETTLE = 0.3
+KEY_LEAD = ["--step", "sleep 0.3"]
+DISMISS_ATTEMPTS = 3
+# The software keyboard's own keys, when the app's tree shows them.
+KEYBOARD_KEY_IDS = ("Return", "delete", "shift", "space")
+
+
+def is_keyboard_key(node: dict[str, Any]) -> bool:
+    return node_type(node) == "Button" and node.get("AXUniqueId") in KEYBOARD_KEY_IDS
+
+
+def press_keys(udid: str, codes: list[int]) -> None:
+    invalidate_hierarchy(udid)
+    steps: list[str] = []
+    for code in codes:
+        steps += ["--step", f"key {code}", "--step", "sleep 0.05"]
+    axe(udid, "batch", *KEY_LEAD, *steps, "--step", f"sleep {KEY_SETTLE}")
 
 
 def execute_action(
@@ -1434,6 +1936,130 @@ def run_action(
         after = [node for node in hierarchy(udid) if text_field(node, selector)]
         nearest = min(after, key=lambda node: abs(frame_center(node)[1] - frame_center(field)[1]), default={})
         return {"value": str(nearest.get("AXValue") or "")}
+    elif kind == "dismiss_keyboard":
+        # The Simulator keeps the software keyboard out of the app's AX tree, so there is no key
+        # to find: tap the app's own button (a toolbar "Done") when named, else send Return.
+        if "button" in action:
+            node = resolve_node(udid, {"label": action["button"]}, timeout, optional_prompt_labels)
+            tap_point(udid, *frame_center(node), post_delay)
+        else:
+            # The first Return can be spent accepting a QuickType/autocorrect suggestion; when the
+            # keyboard's keys are still in the tree (an app's keyboard often is), send another.
+            for _ in range(DISMISS_ATTEMPTS):
+                press_keys(udid, [KEY_CODES["return"]])
+                time.sleep(max(post_delay, 0.4))
+                if not any(is_keyboard_key(node) for node in hierarchy(udid)):
+                    break
+    elif kind == "pull_to_refresh":
+        if has_selector(action):
+            area = resolve_node(udid, selector_of(action), timeout, optional_prompt_labels).get("frame") or {}
+            x0, y0, width, height = (float(area.get(key, 0)) for key in ("x", "y", "width", "height"))
+        else:
+            x0, y0, width, height = screen_box(hierarchy(udid, HIERARCHY_REUSE))
+        x = x0 + width / 2
+        drag(udid, [x, y0 + height * 0.25], [x, y0 + height * 0.75], 0,
+             float(action.get("duration", 0.8)), max(post_delay, 1.0))
+    elif kind == "set_switch":
+        selector = selector_of(action)
+        wanted = "1" if bool(required(action, "on", f"action {index}")) else "0"
+        node = resolve_node(udid, selector, timeout, optional_prompt_labels, accept=is_switch)
+        if ax_text(node) == wanted:
+            return {"toggled": False}
+        if TRAIL is not None:
+            TRAIL.touch()
+        frame = node.get("frame") or {}
+        x, y = switch_point(node)
+        # The same switch, found by where it was: its value is what changes.
+        moved = {**{k: v for k, v in selector.items() if k != "value"}, "frame": {
+            "min_x": float(frame.get("x", 0)) - 4, "max_x": float(frame.get("x", 0)) + 4,
+            "min_y": float(frame.get("y", 0)) - 4, "max_y": float(frame.get("y", 0)) + 4,
+        }}
+
+        def flipped(nodes: list[dict[str, Any]]) -> str | None:
+            if any(matches(n, moved) and is_switch(n) and ax_text(n) == wanted for n in nodes):
+                return None
+            return f"switch did not turn {'on' if wanted == '1' else 'off'}"
+
+        deadline = time.perf_counter() + timeout
+        for touches in (1, 2):
+            invalidate_hierarchy(udid)
+            axe(udid, "touch", "-x", f"{x:.2f}", "-y", f"{y:.2f}", "--down", "--up", "--delay", str(SWITCH_PRESS))
+            time.sleep(max(post_delay, TAP_SETTLE))
+            left = max(deadline - time.perf_counter(), 0.1)
+            try:
+                # A touch AXe sends on a loaded Mac is sometimes dropped (measured: 1 in 8): touch
+                # once more when the switch has not moved after SWITCH_RETRY, never a third time.
+                poll_until(udid, flipped, min(left, SWITCH_RETRY) if touches == 1 else left, optional_prompt_labels)
+                return {"toggled": True, **({"touches": touches} if touches > 1 else {})}
+            except FastUIError:
+                if touches == 2 or deadline - time.perf_counter() <= 0:
+                    raise
+        return {"toggled": True}
+    elif kind == "tap_alert":
+        label = str(required(action, "button", f"action {index}"))
+        system_only = bool(action.get("system", False))
+        found: list[Any] = [None]
+        auto_before = len(AUTO_TAPPED)
+
+        def auto_tapped() -> bool:
+            return any(item["button"] == label for item in AUTO_TAPPED[auto_before:])
+
+        def alert_ready(nodes: list[dict[str, Any]]) -> bool:
+            if auto_tapped():
+                return True  # the optional_permission_labels auto-tap already pressed it
+            hit = alert_button(nodes, label, system_only)
+            found[0] = None if hit is None else (*hit, system_alert(nodes) is hit[1])
+            return hit is not None
+
+        try:
+            wait_nodes(udid, alert_ready, timeout, optional_prompt_labels, first_poll_max_age=HIERARCHY_REUSE)
+        except FastUIError as error:
+            if auto_tapped():
+                # Pressed by the auto-tap on the last poll before the deadline.
+                return {"alert": AUTO_TAPPED[-1]["alert"], "system": True, "auto_tapped": True}
+            if action.get("optional", False):
+                # A permission prompt that iOS chose not to show (already answered, or dropped
+                # right after a boot) is not a failure of the flow.
+                return {"skipped": True}
+            raise FastUIError(f"no alert with a '{label}' button: {error}") from error
+        if found[0] is None:
+            return {"alert": AUTO_TAPPED[-1]["alert"], "system": True, "auto_tapped": True}
+        button_node, sheet, is_system = found[0]
+        tap_point(udid, *frame_center(button_node), post_delay)
+        return {"alert": str(sheet.get("AXLabel") or ""), "system": is_system}
+    elif kind == "assert_value":
+        selector = selector_of(action)
+        attribute = {"value": "AXValue", "label": "AXLabel"}.get(action.get("attribute", "value"))
+        if attribute is None:
+            raise FastUIError(f"action {index}: attribute must be value or label")
+        check_text("", action, f"action {index}: assert_value")  # checks the keys before any polling
+
+        def value_check(nodes: list[dict[str, Any]]) -> str | None:
+            candidates = sort_nodes([node for node in nodes if matches(node, selector) and tappable(node)], ["y", "x"])
+            if not candidates:
+                return "no node matched the selector"
+            # A row's container often carries the control's id (or label) without its value:
+            # read the top-left match that has the attribute at all.
+            node = next((node for node in candidates if node.get(attribute) not in (None, "")), candidates[0])
+            failure = check_text(ax_text(node, attribute), action, "assert_value")
+            if failure is None:
+                return None
+            return f"{action.get('attribute', 'value')} of the {node_type(node) or 'node'} {failure}"
+
+        poll_until(udid, value_check, timeout, optional_prompt_labels)
+    elif kind == "assert_count":
+        selector = selector_of(action)
+        if not any(key in action for key in ("count", "min", "max")):
+            raise FastUIError(f"action {index}: assert_count needs count, min or max")
+        seen: list[int] = [0]
+
+        def count_check(nodes: list[dict[str, Any]]) -> str | None:
+            seen[0] = len(deduped([node for node in nodes if matches(node, selector) and tappable(node)]))
+            failure = count_failure(seen[0], action)
+            return None if failure is None else f"{seen[0]} nodes matched, {failure}"
+
+        poll_until(udid, count_check, timeout, optional_prompt_labels)
+        return {"count": seen[0]}
     elif kind == "shake":
         # UIKit on the Simulator listens for this notification; Hardware › Shake posts it too.
         command(["xcrun", "simctl", "spawn", udid, "notifyutil", "-p", "com.apple.UIKit.SimulatorShake"])
@@ -1533,6 +2159,11 @@ def run_do(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
     udid = args.simulator
+    try:
+        ensure_not_busy(udid)
+    except FastUIError as error:
+        print(f"FAIL error={error}", file=sys.stderr)
+        return 1
     args.out.mkdir(parents=True, exist_ok=True)
     TRAIL = new_trail(args.app) if args.app else None
     results: list[dict[str, Any]] = []
@@ -1678,6 +2309,21 @@ def main() -> int:
     video: Path | None = None
     labels_per_step: list[dict[str, Any]] = []
     previous_ui: dict[str, str] = {}
+    lease: SimulatorLease | None = None
+    if not args.build_only:
+        # One run per simulator: a second run on the same UDID would interleave taps.
+        lease = SimulatorLease(udid, flow_path)
+        try:
+            with metrics.measure("lease"):
+                lease.acquire(float(os.environ.get("FAST_UI_LOCK_WAIT", "0")))
+        except FastUIError as error:
+            print(f"BUSY task={name} error={error}", file=sys.stderr)
+            return 3
+        lease.touch("bundle_id", bundle_id)
+        if setup.get("preferences"):
+            lease.touch("preferences", sorted(setup["preferences"]))
+    previous_handlers = {sig: signal.signal(sig, raise_interrupted) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    torn_down = False
 
     try:
         with metrics.measure("prepare"):
@@ -1698,10 +2344,16 @@ def main() -> int:
         current_step = "state_and_launch"
         with metrics.measure(current_step):
             apply_ui_settings(udid, variant, previous_ui)
+            if previous_ui and lease is not None:
+                lease.touch("ui", dict(previous_ui))
             set_preferences(udid, bundle_id, setup.get("preferences", {}))
             if recorder:
                 recorder.start()
             launch = ["xcrun", "simctl", "launch", udid, bundle_id]
+            if not fresh_install and setup.get("relaunch", True):
+                # A kept install may still be running from the last run, on whatever screen it
+                # was left; `simctl launch` alone would just bring that screen to the front.
+                launch.insert(3, "--terminate-running-process")
             launch += [str(value) for value in setup.get("launch_arguments", [])]
             if TRAIL is not None:
                 TRAIL.gesture({"type": "launch"})
@@ -1747,6 +2399,27 @@ def main() -> int:
             suffix += unsettled_note(results)
             print(f"PASS task={name} total={metrics.total:.1f}s build={'yes' if built else 'skip'}{suffix} artifacts={file_link(artifacts)}{evidence_suffix}")
         return 0
+    except (Interrupted, KeyboardInterrupt) as error:
+        # Stop fast and leave evidence: no AXe dump, no video encode, just the raw file.
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, signal.SIG_IGN)
+        reason = str(error) or "interrupted by SIGINT"
+        if recorder:
+            try:
+                recorder.stop()
+            except Exception:
+                pass
+        payload = {
+            "status": "interrupted", "task": name, "simulator": udid, "session": args.session,
+            "step": current_step, "error": reason,
+            "built": built, "total_seconds": metrics.total, "steps_seconds": metrics.steps,
+            "results": results, "artifacts": str(artifacts),
+            **({"raw_video": str(recorder.path)} if recorder and recorder.path.exists() else {}),
+        }
+        (artifacts / "metrics.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"INTERRUPTED task={name} step={current_step} total={metrics.total:.1f}s error={reason} "
+              f"artifacts={file_link(artifacts)}", file=sys.stderr)
+        return 130
     except (FastUIError, OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError) as error:
         failed_at = recorder.elapsed() if recorder else 0.0
         if recorder:
@@ -1785,9 +2458,19 @@ def main() -> int:
         return 1
     finally:
         finish_trail(args.build_only, current_step)
-        restore_ui_settings(udid, previous_ui)
-        if not args.build_only and not args.keep_state:
-            reset_preferences(udid, bundle_id, setup.get("preferences", {}), fresh_install)
+        # A TERM during teardown would leave half the undo done; SIGKILL still can, and the
+        # journal's dirty flag covers that.
+        for sig in previous_handlers:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            if lease is not None:
+                teardown(udid, bundle_id, previous_ui, setup.get("preferences", {}), fresh_install, args.keep_state)
+                torn_down = True
+        finally:
+            if lease is not None:
+                lease.release(clean=torn_down)
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

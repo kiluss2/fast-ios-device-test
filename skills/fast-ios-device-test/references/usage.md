@@ -89,6 +89,26 @@ Supported actions:
   instead of swallowing the tap. Pass `optional: true` to skip that resolution and
   tolerate a missing control.
 - `tap_point`: tap a declared coordinate.
+- `set_switch`: `on` `true`/`false` on the switch a selector names (a caption with the same label
+  is skipped). It touches only when the value differs, waits until the switch reads the new value
+  and returns `toggled`. A wide SwiftUI Toggle row is touched near its trailing edge. On the
+  Simulator the touch is held 0.3 s (the iOS 27 switch ignores a shorter one) and sent once more
+  when the switch has not moved after 2 s (a touch AXe sends on a loaded Mac is sometimes lost).
+- `assert_value`: the selector's top-left match (the first one that has the attribute, since a
+  row's container often shares the control's id) with `equals`, `not_equals`, `contains` or
+  `matches` (a regex) on its `value` (default) or `"attribute": "label"`. Polled until `timeout`;
+  the FAIL line says what it read and from which element type.
+- `assert_count`: the number of on-screen nodes a selector matches (one per box, nested copies
+  count once) against `count`, `min` and/or `max`; `count: 0` proves a list is empty. Returns `count`.
+- `tap_alert`: taps `button` inside an alert. `"system": true` takes only a system alert (a
+  permission prompt) and never the app's own alert or a same-named button in the app's layout;
+  `"optional": true` returns `skipped` when no such alert comes (a prompt iOS did not show again).
+  A button that `optional_permission_labels` already pressed is reported as `auto_tapped`.
+- `dismiss_keyboard`: taps the app's own `button` (a toolbar `Done`) when named, else sends
+  Return (up to three times; the first can be spent on an autocorrect suggestion). On a Simulator
+  showing no software keyboard (the Mac keyboard is connected) it only sends Return.
+- `pull_to_refresh`: drags from a quarter to three quarters down the screen, or down the element
+  a selector names (a list), then holds 1 s for the refresh to start.
 - `long_press`: hold for `duration` seconds (default 1) on a selector, resolved as `tap_label`
   resolves it, or on `x`/`y`: a context menu, or a Home Screen widget's `Edit Widget`.
 - `double_tap`: two taps on a selector or `x`/`y` (zoom a photo, like a post).
@@ -204,7 +224,8 @@ a swipe can scroll the screen it was meant to leave alone.
 
 Selectors accept `label`, `label_contains`, `label_is_empty`, `id` (the
 accessibilityIdentifier, `AXUniqueId`), `value` (`AXValue`: "1"/"0" for a switch, the text of
-a field), `element_type`, and bounds nested under `frame`, such as `{"frame": {"min_y": 400,
+a field), `element_type`, `enabled` (`false` matches a disabled button: "Continue stays disabled
+until the form is valid"; a dump marks such nodes `"enabled": false`), and bounds nested under `frame`, such as `{"frame": {"min_y": 400,
 "max_width": 200}}` (`min_`/`max_` of `x`, `y`, `width`, `height`). `id` is the most stable
 key when the app sets identifiers; `tap_label` takes every key too. Missing or ambiguous
 required selectors fail closed. Optional system prompts are declared under
@@ -214,6 +235,10 @@ before a `screenshot`, so prompts that appear late do not need fixed sleeps or a
 retry loop. `pause`, `tap_point` and `swipe` read no tree: a prompt raised during them stays
 up until the next of those actions. Declare the prompt's label rather than tapping it by
 coordinate; its position moves while it animates in.
+
+A bare label is tapped on a system prompt, or on a Button outside any sheet only while a system
+screen is up (StoreKit's sign-in alert); on the app's own screen (its tree's root carries the app's
+name) a same-named button is the app's UI and is never tapped. One wait taps at most four prompts.
 
 Bare labels answer in the order they are declared, so two prompts that share a button name
 get the same answer: notifications and tracking both have `Allow`. A rule names the button
@@ -263,8 +288,8 @@ the flow file, never in the engine.
 Matrix variants: `setup.appearance` (`light`/`dark`) and `setup.content_size`
 (a `simctl ui content_size` name), or `--appearance` / `--content-size` on the
 command line, which win over the flow. The runner applies them with `simctl ui`
-before launch, restores the simulator's previous values after the run (pass or
-fail), and names the task `<flow>@dark@xxl` so each variant is its own report
+before launch, restores the simulator's previous values after the run (pass, fail or
+interrupted; see "One run per simulator"), and names the task `<flow>@dark@xxl` so each variant is its own report
 row. An app that forces its own theme from stored settings needs that setting
 seeded in `preferences` as well.
 
@@ -287,6 +312,40 @@ For a new task, generate the smallest temporary flow containing only its
 state/actions/assertions, then remove it after the run. Save reusable flows only
 when the user requests persistence. The engine itself should never be changed
 for a new screen.
+
+## One run per simulator, and nothing left behind
+
+A flow run holds a lock on its simulator (`~/Library/Caches/fast-ui/locks/<udid>.lock`) from the
+build to the end. A second run on the same simulator prints `BUSY task=<flow> error=simulator
+busy: <udid> is running <flow> (pid …)` and exits 3 before touching anything; `fastSimulatorTest
+do` on that simulator fails the same way. `FAST_UI_LOCK_WAIT=<seconds>` waits for the lock instead.
+`--build-only` takes no lock.
+
+The lock file is also a journal of what the run changed: the appearance and text size it set,
+the preference keys it seeded, the app it launched. When the run ends (PASS, FAIL, Ctrl-C,
+SIGTERM or SIGHUP) the engine restores the appearance and text size, terminates the app (the next
+run, or a person, would otherwise start on whatever screen the flow ended) and deletes the
+seeded keys; `--keep-state` keeps the app running and the keys. An interrupted run prints
+`INTERRUPTED task=… step=… error=interrupted by SIGTERM` and exits 130. A run killed with SIGKILL
+cannot clean up: the next run on that simulator repairs from the journal first and says so with
+`WARN dirty=1: previous run pid … was killed before teardown; repaired ui, bundle_id, preferences`.
+
+A flow with `"fresh_install": false` relaunches the app (`simctl launch
+--terminate-running-process`), so it starts from the app's first screen; `"relaunch": false` in
+`setup` brings a running app to the front as before.
+
+## SwiftLint and build failures
+
+Test builds skip SwiftLint: the build runs with a no-op `swiftlint` first on `PATH` and as an
+exported shell function (which also beats a phase that puts `/opt/homebrew/bin` ahead of `PATH`
+in sh/bash). The run prints `lint=shimmed (<phase>)` on stderr when the project has a SwiftLint
+phase, or `lint=not-shimmable (<reason>)` for a phase the shim cannot reach (swiftlint called by
+path, through `mint`, a PATH prepend in zsh, or the SwiftLint build-tool plugin). `"skip_lint":
+false` in `app`, or `FAST_UI_SKIP_LINT=0`, lints (`lint=on`). `fastDeviceTest`'s build of an
+app's own tests skips it the same way.
+
+A failed build says why: `build failed in <command or run-script phase> first error: <file:line:
+error: …> (+N more) log=<derived_data>/.fastui-build.log`, with a hint when SwiftLint failed it.
 
 ## Physical iPhone (`fastDeviceTest`)
 
@@ -540,6 +599,9 @@ fastUIMap clear com.apple.Preferences        # or: fastUIMap clear --all
   `--app` (step-by-step `do`).
 - `FAST_UI_MAP=0`: no screen map recording; `FAST_UI_MAP_DIR`: map folder
   (`~/Library/Caches/fast-ui-map`).
+- `FAST_UI_LOCK_WAIT`: seconds a flow waits for a busy simulator (0: fail at once with `BUSY`);
+  `FAST_UI_LOCK_DIR`: lock and journal folder (`~/Library/Caches/fast-ui/locks`).
+- `FAST_UI_SKIP_LINT=0`: lint in test builds (default: SwiftLint skipped).
 
 ## Cache model
 

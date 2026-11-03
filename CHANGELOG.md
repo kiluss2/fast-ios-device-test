@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.12.0 — 2026-11-03
+
+Ported from DungVC-Dev/fast-ios-device-test 2.1.1 (its 1.11.0 work), adapted to this line and
+checked on an iPhone 17 simulator (iOS 27, Xcode 27.0).
+
+### Checks and controls on both engines
+
+- `assert_value` (`equals` / `not_equals` / `contains` / `matches` on a value or `"attribute":
+  "label"`, polled), `assert_count` (`count` / `min` / `max`, one per box) and the selector key
+  `enabled`; a dump marks a disabled node `"enabled": false`.
+- `set_switch` `on`: touches only when the value differs and waits for the new value. On the
+  Simulator the touch is held 0.3 s (the iOS 27 switch ignores a shorter one) and sent once more
+  when the switch has not moved after 2 s: on a loaded Mac (load 40+) 1 of 8 touches was lost.
+- `tap_alert` `button` (`system`, `optional`), `dismiss_keyboard` (`button`, else Return),
+  `pull_to_refresh` (the screen or a selector's element).
+- Fixed against the source: `assert_value` read a row's container, which shares the control's id
+  but has no value (Settings › Display & Text Size: Group, CheckBox and Button all carry
+  `BUTTON_SHAPES`); it now reads the first match that has the attribute and names its type.
+- Simulator prompts: a bare label in `optional_permission_labels` no longer taps a same-named
+  button on the app's own screen (checked: Maps' in-app `Not Now` stayed); prompts inside a
+  system alert are tapped as before. One wait taps at most 4 prompts.
+- `tap_alert` joins the destructive-word guard of multi-step `do` (`"button": "Delete"`).
+- iPhone: an XCTest failure inside a step fails that step instead of ending the runner.
+- Checked on an iPhone 15 Pro Max, iOS 27.2: `set_switch` (on, already on, off), `assert_value` by an
+  id three nodes share, `assert_count`, `enabled: false`, `dismiss_keyboard` (Return and a named
+  `close`, 3/3 each), `pull_to_refresh` (Safari reported "Refreshing content"), `tap_alert` on
+  Settings' Location Services confirmation (`Cancel`; `system: true` skipped it as the app's own).
+- Fixed on the iPhone while checking: iOS 27 reports a UIAlertController as a sheet, so
+  `tap_alert` and the prompt rules (`optional_permission_labels`, `--prompt-labels`) now look for
+  alerts and sheets in one query, and a dump names that type `Sheet`, as AXe does. Before, the
+  prompt rules could not see an app's own alert on iOS 27 (SpringBoard's permission prompts on iOS
+  27 were not available to check). `dismiss_keyboard` waits up to 2 s for the
+  keyboard to slide away instead of failing a tap that worked.
+- `dismiss_keyboard` on the Simulator could not be shown closing a keyboard: Device Hub with the
+  Mac keyboard shows none.
+
+### One run per simulator, and nothing left behind
+
+- A flow run locks its simulator: a second run prints `BUSY` and exits 3, `fastSimulatorTest do`
+  fails with `simulator busy` (`FAST_UI_LOCK_WAIT` waits instead).
+- The lock file journals what the run changed; at the end, Ctrl-C, SIGTERM and SIGHUP included
+  (`INTERRUPTED`, exit 130), the engine restores appearance and text size, terminates the app and
+  deletes seeded keys (`--keep-state` keeps app and keys). After a SIGKILL the next run repairs
+  from the journal (`WARN dirty=1`). Checked live: dark mode back to light, the seeded key gone.
+- `"fresh_install": false` relaunches the app (`--terminate-running-process`); `"relaunch":
+  false` keeps the old behaviour.
+
+### SwiftLint skipped in test builds, and build failures that say why
+
+- A no-op `swiftlint` (PATH shim plus an exported shell function) in `fastSimulatorTest` builds
+  and `fastDeviceTest`'s build of an app's tests; `lint=shimmed|not-shimmable|on` on stderr;
+  `"skip_lint": false` / `FAST_UI_SKIP_LINT=0` lints.
+- A failed build prints the failing phase and its first `error:` line instead of the last log
+  lines, and keeps the log in `<derived_data>/.fastui-build.log`. Checked with xcodebuild on a
+  probe app with a `force_cast` error: lint on → `build failed in SwiftLint (run-script phase
+  'SwiftLint') first error: …App.swift:11:22: error: Force Cast Violation…`; default → `READY`.
+
 ## 1.11.0 — 2026-11-02
 
 ### `capture`: the picture and the tree of the same instant
