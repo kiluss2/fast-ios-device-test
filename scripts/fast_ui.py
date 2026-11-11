@@ -516,6 +516,34 @@ def resolve_tap_target(
     return candidates[0] if len(candidates) == 1 else None
 
 
+STEADY_TIMEOUT = 1.5
+
+
+def frame_key(node: dict[str, Any]) -> tuple[int, ...]:
+    frame = node.get("frame") or {}
+    return tuple(round(float(frame.get(key, 0) or 0)) for key in ("x", "y", "width", "height"))
+
+
+def steady_target(
+    udid: str, selector: dict[str, Any], explicit_type: bool, target: dict[str, Any], timeout: float = STEADY_TIMEOUT
+) -> dict[str, Any]:
+    """The target once its frame stops moving. A control on a sheet still sliding in is listed at a
+    frame it has already left, so a tap there lands on whatever is under it now and the flow goes on
+    in the wrong state."""
+    deadline = time.perf_counter() + timeout
+    previous = target
+    while time.perf_counter() < deadline:
+        time.sleep(0.1)
+        try:
+            current = resolve_tap_target(hierarchy(udid), selector, explicit_type)
+        except FastUIError:
+            return previous
+        if current is None or frame_key(current) == frame_key(previous):
+            return current or previous
+        previous = current
+    return previous
+
+
 def wait_selector(
     udid: str,
     selector: dict[str, Any],
@@ -861,6 +889,8 @@ def raise_interrupted(signum: int, _frame: Any) -> None:
 
 
 LOCK_DIR = Path(os.environ.get("FAST_UI_LOCK_DIR") or Path.home() / "Library/Caches/fast-ui/locks")
+# `do` used to write into the shell's folder, which put screenshots in the app repo.
+DO_OUT = Path.home() / "Library/Caches/fast-ui/do"
 
 
 class SimulatorLease:
@@ -937,8 +967,7 @@ class SimulatorLease:
         bundle_id = previous.get("bundle_id")
         if bundle_id:
             command(["xcrun", "simctl", "terminate", udid, bundle_id], check=False)
-            for key in previous.get("preferences") or []:
-                command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id, key], check=False)
+            restore_preferences(udid, bundle_id, previous.get("preferences") or [], previous.get("preferences_saved") or {})
         self.repaired = [key for key in ("ui", "bundle_id", "preferences") if previous.get(key)]
         print(
             f"WARN dirty=1: previous run pid {previous.get('pid', '?')} ({previous.get('flow', '?')}) "
@@ -972,10 +1001,11 @@ def ensure_not_busy(udid: str) -> None:
 
 def teardown(
     udid: str, bundle_id: str, previous_ui: dict[str, str], preferences: dict[str, Any],
-    fresh_install: bool, keep_state: bool,
+    fresh_install: bool, keep_state: bool, saved: dict[str, str] | None = None,
 ) -> None:
     """Undo what this run changed: the appearance and text size it set, and unless
-    --keep-state, the app left running on whatever screen the flow ended and the seeded keys."""
+    --keep-state, the app left running on whatever screen the flow ended and the seeded keys
+    (back to the value they had before the run, `saved`, or removed when they had none)."""
     restore_ui_settings(udid, previous_ui)
     if keep_state:
         return
@@ -987,8 +1017,34 @@ def teardown(
         if fresh_install:
             command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id], check=False)
         else:
-            for key in preferences:
-                command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id, key], check=False)
+            restore_preferences(udid, bundle_id, list(preferences), saved or {})
+
+
+def plist_fragment(value: Any) -> str:
+    """One value as the XML `defaults write` takes for any type: `<true/>`, `<dict>…</dict>`."""
+    text = plistlib.dumps(value, fmt=plistlib.FMT_XML).decode("utf-8")
+    return text.split('<plist version="1.0">', 1)[1].rsplit("</plist>", 1)[0].strip()
+
+
+def saved_preferences(udid: str, bundle_id: str, keys: list[str]) -> dict[str, str]:
+    """What the keys a kept install is about to have seeded hold now, as plist fragments; a key the
+    domain does not have is left out, so the undo removes it."""
+    result = command(["xcrun", "simctl", "spawn", udid, "defaults", "export", bundle_id, "-"], check=False)
+    try:
+        domain = plistlib.loads(result.stdout.encode("utf-8")) if result.returncode == 0 else {}
+    except Exception:  # noqa: BLE001 - an unreadable domain means nothing to restore
+        domain = {}
+    if not isinstance(domain, dict):
+        return {}
+    return {key: plist_fragment(domain[key]) for key in keys if key in domain}
+
+
+def restore_preferences(udid: str, bundle_id: str, keys: list[str], saved: dict[str, str]) -> None:
+    for key in keys:
+        if key in saved:
+            command(["xcrun", "simctl", "spawn", udid, "defaults", "write", bundle_id, key, saved[key]], check=False)
+        else:
+            command(["xcrun", "simctl", "spawn", udid, "defaults", "delete", bundle_id, key], check=False)
 
 
 class Recorder:
@@ -1695,6 +1751,8 @@ def run_action(
                 first_poll_max_age=HIERARCHY_REUSE,
             )
             target = resolve_tap_target(nodes, selector, explicit_type)
+            if target is not None:
+                target = steady_target(udid, selector, explicit_type, target)
         if target is not None:
             press_at(kind, action, udid, *frame_center(target), post_delay)
             if node_type(target) != selector["element_type"]:
@@ -2138,7 +2196,7 @@ def run_do(argv: list[str]) -> int:
     parser.add_argument("--simulator", default=os.environ.get("FAST_SIMULATOR"), help="UDID (env FAST_SIMULATOR)")
     parser.add_argument("--app", default=os.environ.get("FAST_UI_APP", ""),
                         help="Bundle id for launch/terminate and the screen map (env FAST_UI_APP)")
-    parser.add_argument("--out", type=Path, default=Path.cwd(), help="Where screenshots and dumps go")
+    parser.add_argument("--out", type=Path, default=DO_OUT, help=f"Where screenshots and dumps go (default {DO_OUT})")
     parser.add_argument("--prompt-labels", help='Prompt buttons this request may tap on its own, as for fastDeviceTest do')
     args = parser.parse_args(argv)
     # Input refused before anything runs goes to stderr, as `fastDeviceTest do` prints it.
@@ -2309,6 +2367,7 @@ def main() -> int:
     video: Path | None = None
     labels_per_step: list[dict[str, Any]] = []
     previous_ui: dict[str, str] = {}
+    saved_prefs: dict[str, str] = {}
     lease: SimulatorLease | None = None
     if not args.build_only:
         # One run per simulator: a second run on the same UDID would interleave taps.
@@ -2346,6 +2405,12 @@ def main() -> int:
             apply_ui_settings(udid, variant, previous_ui)
             if previous_ui and lease is not None:
                 lease.touch("ui", dict(previous_ui))
+            if setup.get("preferences") and not fresh_install:
+                # A kept install may already hold these keys (set by hand or by the app): keep their
+                # values so the undo puts them back instead of deleting them.
+                saved_prefs = saved_preferences(udid, bundle_id, list(setup["preferences"]))
+                if lease is not None and saved_prefs:
+                    lease.touch("preferences_saved", saved_prefs)
             set_preferences(udid, bundle_id, setup.get("preferences", {}))
             if recorder:
                 recorder.start()
@@ -2464,7 +2529,8 @@ def main() -> int:
             signal.signal(sig, signal.SIG_IGN)
         try:
             if lease is not None:
-                teardown(udid, bundle_id, previous_ui, setup.get("preferences", {}), fresh_install, args.keep_state)
+                teardown(udid, bundle_id, previous_ui, setup.get("preferences", {}), fresh_install, args.keep_state,
+                         saved_prefs)
                 torn_down = True
         finally:
             if lease is not None:

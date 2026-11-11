@@ -28,6 +28,8 @@ from fast_media import VIDEO_SUFFIXES, prune_artifacts, publish_video, shrink_vi
 import fast_evidence  # noqa: E402
 import fast_guard  # noqa: E402
 from fast_ui_map import record  # noqa: E402
+
+DO_OUT = Path.home() / "Library/Caches/fast-ui/do"
 RUNNER_SOURCE = HERE.parent / "device-runner"
 CACHE_ROOT = Path(os.environ.get("FAST_DEVICE_CACHE", Path.home() / "Library/Caches/fast-device-test"))
 PROFILE_DIRS = [
@@ -905,7 +907,7 @@ def run_command(argv: list[str]) -> int:
             "or a JSON array of actions run in one request (stops at the first failure)",
         )
         parser.add_argument("--app", help="Bundle id to drive from this (or the first) action on")
-        parser.add_argument("--out", type=Path, default=Path.cwd(), help="Where screenshots go")
+        parser.add_argument("--out", type=Path, default=DO_OUT, help=f"Where screenshots go (default {DO_OUT})")
         parser.add_argument(
             "--idle-wait", action="store_true",
             help="Use XCUITest's wait-for-idle around each event; by default it is off and the runner "

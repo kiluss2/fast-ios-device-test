@@ -119,7 +119,7 @@ launch) and print one PASS/FAIL line with the visible labels after the actions.
 - "Must not show" → `assert_absent` (`seconds` ≤ 8); "closes" → `wait_absent`. A successful
   tap proves nothing about absence.
 - Fresh install wipes the defaults domain, and the engine undoes what a run changed (seeded
-  preferences, appearance, text size; the app is terminated) even when the run is interrupted
+  preferences, put back to a kept install's own value; appearance, text size; the app is terminated) even when the run is interrupted
   (`--keep-state` to inspect). One run per simulator: a second one prints `BUSY` (exit 3) and a
   `do` on it fails with `simulator busy`. Seed Codable values as `{"$json_data": …}`.
 - Prove state with checks, not with a tap that happened to work: `assert_value` (`equals`,

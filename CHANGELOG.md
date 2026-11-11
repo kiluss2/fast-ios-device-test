@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.13.0 — 2026-11-11
+
+- Simulator: on a kept install (`fresh_install: false`) a seeded `setup.preferences` key that
+  already held a value gets that value back after the run (and after a killed run's repair)
+  instead of being deleted; a key the app did not have is still removed.
+- `tap_label` re-reads its control until the frame stops moving (up to 1.5 s) before tapping, so
+  a tab on a sheet still sliding in is hit where it lands, not where it was listed.
+- `fastSimulatorTest do` and `fastDeviceTest do` write pictures and dumps to `--out`, by default
+  `~/Library/Caches/fast-ui/do`, no longer the shell's folder (it put screenshots in the app repo).
+
 ## 1.12.0 — 2026-11-03
 
 Ported from DungVC-Dev/fast-ios-device-test 2.1.1 (its 1.11.0 work), adapted to this line and

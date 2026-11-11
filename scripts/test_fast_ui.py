@@ -9,6 +9,7 @@ import importlib.util
 import io
 import itertools
 import json
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -148,6 +149,15 @@ class ActionTests(unittest.TestCase):
             fast_ui.execute_action({"type": "tap_label", "label": "Yes"}, "SIM", Path("/tmp"), 1, [])
         tap.assert_called_once_with("SIM", 60.0, 40.0, 0.15)
         axe.assert_not_called()
+
+    def test_tap_label_waits_for_a_sliding_control_to_stop(self) -> None:
+        def at(y: float) -> list[dict[str, Any]]:
+            return [{"AXLabel": "Nickname", "type": "Button", "frame": {"x": 200, "y": y, "width": 100, "height": 40}}]
+        trees = [at(600), at(420), at(300), at(300)]
+        with mock.patch.object(fast_ui, "hierarchy", side_effect=lambda *_a, **_k: trees.pop(0) if len(trees) > 1 else trees[0]), \
+                mock.patch.object(fast_ui, "tap_point") as tap, mock.patch.object(fast_ui.time, "sleep"):
+            fast_ui.execute_action({"type": "tap_label", "label": "Nickname"}, "SIM", Path("/tmp"), 1, [])
+        tap.assert_called_once_with("SIM", 250.0, 320.0, 0.15)
 
     def test_optional_tap_label_skips_when_missing(self) -> None:
         with mock.patch.object(fast_ui, "hierarchy", return_value=[]), \
@@ -577,7 +587,7 @@ class SimulatorTrailTests(unittest.TestCase):
     def test_trail_skips_prompt_taps_and_scroll_inner_swipes(self) -> None:
         prompt = sim_tree("Demo", *prompt_sheet(NOTIFICATIONS, "Allow", "Don’t Allow"))
         bottom = sim_tree("Demo", button("Done"), button("Bottom", 700))
-        fake = FakeAxe(prompt, self.A, self.B, self.B, bottom)
+        fake = FakeAxe(prompt, self.A, self.A, self.B, self.B, bottom)
         trail = self.run_actions(fake, {"type": "tap_label", "label": "Go"}, {"type": "scroll_to", "label": "Bottom"},
                                  prompts=["Allow"])
         self.assertEqual([entry["gesture"]["type"] for entry in trail if "gesture" in entry], ["tap_label", "scroll_to"])
@@ -610,7 +620,7 @@ class SimulatorTrailTests(unittest.TestCase):
     def test_reads_of_another_app_break_the_trail(self) -> None:
         fast_ui.TRAIL.gesture({"type": "launch"})
         safari = sim_tree("Safari", button("Address"))
-        trail = self.run_actions(FakeAxe(self.A, safari), {"type": "tap_label", "label": "Go"}, {"type": "wait", "label": "Address"})
+        trail = self.run_actions(FakeAxe(self.A, self.A, safari), {"type": "tap_label", "label": "Go"}, {"type": "wait", "label": "Address"})
         self.assertEqual(self.kinds(trail), ["launch", "screen", "tap_label", "break"])
         self.assertEqual(trail[1]["screen"]["app"], "com.example.app")
 
@@ -1733,6 +1743,41 @@ class LeaseTests(unittest.TestCase):
         command.assert_not_called()
         restore.assert_called_once()
 
+    def test_teardown_puts_back_keys_a_kept_install_already_had(self) -> None:
+        with mock.patch.object(fast_ui, "command") as command, mock.patch.object(fast_ui, "restore_ui_settings"):
+            fast_ui.teardown("SIM", "com.example.app", {}, {"isPremium": True, "theme": "dark"}, False, False,
+                             {"isPremium": "<false/>"})
+        self.assertEqual([call.args[0] for call in command.call_args_list][1:], [
+            ["xcrun", "simctl", "spawn", "SIM", "defaults", "write", "com.example.app", "isPremium", "<false/>"],
+            ["xcrun", "simctl", "spawn", "SIM", "defaults", "delete", "com.example.app", "theme"],
+        ])
+
+    def test_saved_preferences_reads_only_the_seeded_keys_that_exist(self) -> None:
+        domain = plistlib.dumps({"isPremium": False, "profile": {"name": "A", "ids": [1, 2]}, "other": 1}).decode()
+        with mock.patch.object(fast_ui, "command", return_value=subprocess.CompletedProcess([], 0, domain, "")):
+            saved = fast_ui.saved_preferences("SIM", "com.example.app", ["isPremium", "profile", "missing"])
+        self.assertEqual(saved["isPremium"], "<false/>")
+        self.assertEqual(plistlib.loads(plistlib.dumps("x").replace(b"<string>x</string>", saved["profile"].encode())),
+                         {"name": "A", "ids": [1, 2]})
+        self.assertNotIn("missing", saved)
+        with mock.patch.object(fast_ui, "command", return_value=subprocess.CompletedProcess([], 1, "", "no domain")):
+            self.assertEqual(fast_ui.saved_preferences("SIM", "com.example.app", ["isPremium"]), {})
+
+    def test_repair_puts_back_saved_values(self) -> None:
+        with mock.patch.object(fast_ui, "command") as command, mock.patch.object(fast_ui, "restore_ui_settings"), \
+                mock.patch.object(fast_ui, "stop_stale_recorder"), contextlib.redirect_stderr(io.StringIO()):
+            killed = fast_ui.SimulatorLease("SIM", Path("a.json"))
+            killed.acquire(0)
+            killed.touch("bundle_id", "com.example.app")
+            killed.touch("preferences", ["isPremium"])
+            killed.touch("preferences_saved", {"isPremium": "<false/>"})
+            killed.release(clean=False)
+            following = fast_ui.SimulatorLease("SIM", Path("b.json"))
+            following.acquire(0)
+            following.release(clean=True)
+        self.assertIn(["xcrun", "simctl", "spawn", "SIM", "defaults", "write", "com.example.app", "isPremium", "<false/>"],
+                      [call.args[0] for call in command.call_args_list])
+
 
 class RunLifecycleTests(unittest.TestCase):
     """main() with a lease: one run per simulator, and what a run changed is undone."""
@@ -1759,7 +1804,7 @@ class RunLifecycleTests(unittest.TestCase):
             with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow), *argv]), \
                     mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
                     mock.patch.object(fast_ui, "command", side_effect=lambda args, **_: calls.append(args) or
-                                      subprocess.CompletedProcess(args, 0, "", "")), \
+                                      subprocess.CompletedProcess(args, 0, getattr(self, "export", "") if "export" in args else "", "")), \
                     mock.patch.object(fast_ui, "record"), mock.patch.object(fast_ui, "screenshot"), \
                     mock.patch.object(fast_ui, "axe", side_effect=axe or FakeAxe(self.TREE)), \
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -1789,6 +1834,13 @@ class RunLifecycleTests(unittest.TestCase):
         following.acquire(0)
         self.assertEqual(following.repaired, [])
         following.release(clean=True)
+
+    def test_pass_restores_a_value_the_kept_install_had(self) -> None:
+        self.export = plistlib.dumps({"isPremium": False}).decode()
+        code, calls, out, _ = self.run_main([{"type": "wait", "label": "Go"}],
+                                            {"fresh_install": False, "preferences": {"isPremium": True}})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(calls[-1], ["xcrun", "simctl", "spawn", "SIM", "defaults", "write", "com.example.app", "isPremium", "<false/>"])
 
     def test_relaunch_false_keeps_a_running_app(self) -> None:
         _, calls, _, _ = self.run_main([{"type": "wait", "label": "Go"}], {"fresh_install": False, "relaunch": False})

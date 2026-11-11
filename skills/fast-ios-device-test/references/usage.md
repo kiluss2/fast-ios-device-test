@@ -87,7 +87,8 @@ Supported actions:
 - `tap_label`: accessibility tap; resolves the selector through the same polling
   loop as `wait`, so a permission alert that appears between actions is dismissed
   instead of swallowing the tap. Pass `optional: true` to skip that resolution and
-  tolerate a missing control.
+  tolerate a missing control. Before tapping it re-reads the control until its frame
+  stops moving (up to 1.5 s), so a tab on a sheet still sliding in is hit where it lands.
 - `tap_point`: tap a declared coordinate.
 - `set_switch`: `on` `true`/`false` on the switch a selector names (a caption with the same label
   is skipped). It touches only when the value differs, waits until the switch reads the new value
@@ -325,7 +326,8 @@ The lock file is also a journal of what the run changed: the appearance and text
 the preference keys it seeded, the app it launched. When the run ends (PASS, FAIL, Ctrl-C,
 SIGTERM or SIGHUP) the engine restores the appearance and text size, terminates the app (the next
 run, or a person, would otherwise start on whatever screen the flow ended) and deletes the
-seeded keys; `--keep-state` keeps the app running and the keys. An interrupted run prints
+seeded keys; on a kept install (`fresh_install: false`) a key that already held a value gets that
+value back. `--keep-state` keeps the app running and the keys. An interrupted run prints
 `INTERRUPTED task=… step=… error=interrupted by SIGTERM` and exits 130. A run killed with SIGKILL
 cannot clean up: the next run on that simulator repairs from the journal first and says so with
 `WARN dirty=1: previous run pid … was killed before teardown; repaired ui, bundle_id, preferences`.
@@ -527,7 +529,7 @@ not grow at `accessibility-*` sizes as a product finding.
 `fastSimulatorTest do '<action or array>' [--simulator <udid>] [--app <bundle id>] [--out <dir>]
 [--prompt-labels <labels>]` runs actions on what the Simulator shows now (no build, install,
 launch or preferences) and prints `PASS <type>|actions=N [screenshot=…] [ui=…] labels=[…]` or
-`FAIL … step=K type=… error=… labels=[…]`; `fastDeviceTest do` prints the same on the iPhone.
+`FAIL … step=K type=… error=… labels=[…]`; `fastDeviceTest do` prints the same on the iPhone. Pictures and dumps go to `--out` (default `~/Library/Caches/fast-ui/do`), never the shell's folder.
 
 - An array stops at its first failure. `expect` (a selector object) and `expect_timeout`
   (default 2 s) on any action wait for the screen the step leads to, so a wrong guess stops
