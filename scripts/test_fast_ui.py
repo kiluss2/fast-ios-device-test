@@ -21,6 +21,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Engine tests with the default root must never write into the real cache.
+_ARTIFACTS_SANDBOX = tempfile.TemporaryDirectory()
+os.environ["FAST_ARTIFACTS_HOME"] = _ARTIFACTS_SANDBOX.name
+os.environ["FAST_UNIT_TESTS_HOME"] = _ARTIFACTS_SANDBOX.name + "-unit"
 import fast_ui  # noqa: E402
 import fast_ui_map  # noqa: E402
 
@@ -1108,6 +1112,7 @@ class PruneTests(unittest.TestCase):
             old_final.write_bytes(b"v")
             stale = _time.time() - 4 * 86400
             os.utime(old_run, (stale, stale))
+            os.utime(old_run / "metrics.json", (stale, stale))
             os.utime(old_final, (stale, stale))
             removed = fast_ui.prune_artifacts(root, keep_days=3)
             self.assertFalse(old_run.exists())

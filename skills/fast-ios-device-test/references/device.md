@@ -157,7 +157,7 @@ runner is refused ("is busy"); pick another iPhone, never `stop` a runner you di
 A runner this Mac started that no longer answers (after an idle-out, while xcodebuild
 collects diagnostics) is ended and replaced; a locked iPhone is reported in seconds.
 
-- Artifacts: `<project_root>/build/fast-device/<task>/<run>/` with screenshots,
+- Artifacts: `~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash>/fast-device/<task>/<run>/` (outside the project; `fastDeviceTest clean --list`) with screenshots,
   `failure.png`, `failure-ui.txt`, `metrics.json`, the `.xcresult` and, with `--record`,
   the clip (`run.mp4` on FAIL; `<task>/final[-<session>].mp4` on PASS).
 - Device must be unlocked, in Developer Mode, trusting the Mac; enable

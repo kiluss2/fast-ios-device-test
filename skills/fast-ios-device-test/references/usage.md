@@ -31,7 +31,7 @@ The app is built once per DerivedData, not per simulator: the fingerprint
 excludes the simulator UDID, and a file lock in DerivedData serializes
 concurrent builds. Flows running in parallel on different simulators should
 all pass `--reuse-app`. Artifacts land in
-`build/fast-ui/<task>/<timestamp>-<udid8>-<pid>/`, so parallel runs never
+`<artifacts-root>/<task>/<timestamp>-<udid8>-<pid>/`, so parallel runs never
 overwrite each other.
 
 `--record` captures the simulator screen (`simctl io recordVideo`) and re-encodes it at
@@ -41,15 +41,23 @@ it succeeded and came out smaller (`FAST_VIDEO_LONG_SIDE=0` keeps the original).
 PASS the clip becomes `<artifacts-root>/<task>/final.mp4` (`final-<session>.mp4`
 when `--session` is set, so two sessions never overwrite each other) and every
 older clip of that task is deleted; on FAIL the clip stays as `run.mp4` in that
-run's folder. The artifacts root defaults to `<project_root>/build/fast-ui`, which
+run's folder. The artifacts root defaults to `~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash>/fast-ui`
+(outside the project, so the repo collects nothing and needs no ignore rule), which
 is scratch space: pass `--artifacts-root <dir>` (or `FAST_UI_ROOT`) to keep runs,
 screenshots and videos somewhere durable, e.g. the QA report folder, and set
-`FAST_UI_KEEP_DAYS=0` there. Every run first prunes the root: run folders and
-final videos untouched for 3 days are deleted (`FAST_UI_KEEP_DAYS` overrides; `0`
-disables). `fastDeviceTest` prunes its root the same way. A PASS run filed as evidence
+`FAST_UI_KEEP_DAYS=0` there. Every run on the default root first prunes every project's runs untouched for 3 days
+(`FAST_UI_KEEP_DAYS` overrides; `0` disables), then deletes the oldest runs until the whole
+artifacts home fits `FAST_ARTIFACTS_MAX_MB` (2048; `0` disables) and prints one `NOTE` line on
+stderr only when the cap deleted something. A root set with `--artifacts-root` is only age-pruned.
+`fastDeviceTest` shares the same home and rules. By hand: `fastSimulatorTest clean` or
+`fastDeviceTest clean` lists size per project; `--all`, `--days N`, `--project TEXT` delete,
+`--dry-run` previews. Only run folders and `final[-<session>].mp4` inside a home the tool created (marker file; never your home
+folder or a parent of it) are
+deleted, never a run written to in the last 30 minutes (`FAST_ARTIFACTS_PROTECT_MIN`), never a
+symlink. `FAST_UI_KEEP_DAYS` applies to every project in the home. A PASS run filed as evidence
 (below) in the default root keeps only its `metrics.json`.
 `--session <name>` (or `FAST_UI_SESSION`) tags `metrics.json`;
-`scripts/fast_ui_report.py --root <project>/build/fast-ui --session <name>`
+`scripts/fast_ui_report.py --root <artifacts-root> --session <name>`
 (launcher `fastUIReport`) collates every tagged run into a flow × simulator
 table; `--since YYYYmmdd-HHMMSS` works without tags; `--json` for raw cells.
 
@@ -67,7 +75,7 @@ It ends a recorder left running first and prints `SHUTDOWN simulators=<name (udi
 (`SHUTDOWN none booted` when there was nothing to do).
 
 The runner prints one PASS/FAIL line and stores screenshots, failure hierarchy,
-and per-step timings under `build/fast-ui/<task>/<timestamp>/`. Add `--json`
+and per-step timings under `<artifacts-root>/<task>/<timestamp>/`. Add `--json`
 only when full machine-readable results are needed.
 
 ## Dynamic UI flow format
@@ -459,7 +467,7 @@ fastDeviceTest build --project /abs/MyApp/MyApp.xcodeproj --scheme MyApp-DEV \
 - `setup.preferences` → launch arguments (one launch, never persisted);
   `setup.content_size` → `-UIPreferredContentSizeCategoryName`; `setup.appearance`
   → `XCUIDevice.appearance`, restored after the flow.
-- Artifacts: `<project_root>/build/fast-device/<task>/<run>/` (`FAST_DEVICE_ROOT`).
+- Artifacts: `~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash>/fast-device/<task>/<run>/` (`FAST_DEVICE_ROOT`).
 - `--record` (one-shot runs) keeps XCTest's own screen recording of the iPhone and
   re-encodes it at the same review quality as the Simulator: a PASS keeps
   `<artifacts-root>/<task>/final[-<session>].mp4`, a FAIL `run.mp4` in its run folder.
@@ -548,7 +556,7 @@ outcome step. Nothing else is filed: `do`, `--build-only`, other failures.
 
 - The PASS/FAIL line ends with `evidence=file://…` when the run was filed, or
   `evidence_error=…` when filing failed; the run's own result never changes.
-- A filed PASS run in the default root (`build/fast-ui`, `build/fast-device`) keeps only
+- A filed PASS run in the default root (`fast-ui`, `fast-device` under the artifacts home) keeps only
   `metrics.json`, its `video` pointing at the filed clip, so `fastUIReport`, `fastUIReview` and
   `fastEvidenceSheet` `task` cells still work. A root set with `--artifacts-root`,
   `FAST_UI_ROOT` or `FAST_DEVICE_ROOT` is copied from, never emptied.
@@ -667,10 +675,17 @@ fastUIMap clear com.apple.Preferences        # or: fastUIMap clear --all
 - `FAST_UI_SESSION`: default `--session` for both engines.
 - `FAST_VIDEO_LONG_SIDE` / `FAST_VIDEO_KBPS`: review-quality re-encode of recordings
   (960 / 800); `FAST_VIDEO_LONG_SIDE=0` keeps the original clip.
-- `FAST_UI_KEEP_DAYS`: prune age (3 days) for that root and for the default `do` folder
+- `FAST_UI_KEEP_DAYS`: prune age for run artifacts (3 days) and for the default `do` folder
   `~/Library/Caches/fast-ui/do` (a folder given with `--out` is never pruned); `0` disables pruning.
 - `FAST_DEVICE_RUNNER_KEEP_DAYS`: an iPhone runner build unused this long (14 days) is deleted
   when a runner starts; never the one starting nor one a process runs from; `0` keeps them all.
+- `FAST_ARTIFACTS_HOME`: parent of every project's default artifacts
+  (`~/Library/Caches/fast-ios-device-test/artifacts`). `FAST_ARTIFACTS_MAX_MB`: size cap of that
+  home, oldest runs go first (2048; `0` disables). `FAST_ARTIFACTS_PROTECT_MIN`: runs written to
+  within this many minutes are never deleted (30). The `fastUnitTest` build cache lives in
+  `FAST_UNIT_TESTS_HOME` (`~/Library/Caches/fast-ios-device-test/unit-tests`); caches unused for
+  `FAST_UNIT_CACHE_DAYS` (30; `0` keeps them) are deleted by the next `fastUnitTest`; `clean --list`
+  shows them and `clean --builds` deletes them by hand.
 - `FAST_DEVICE_ROOT`: artifacts root for `fastDeviceTest`.
 - `FAST_EVIDENCE`: `0` files no evidence. `FAST_EVIDENCE_DIR`: where evidence folders go
   (`~/Desktop`). `FAST_EVIDENCE_TICKET` / `FAST_EVIDENCE_PROJECT`: name the folder when the

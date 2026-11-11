@@ -24,7 +24,10 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 # bin/ holds symlinks in a git checkout but copies in the zip, so look beside scripts/ too.
 sys.path[:0] = [str(HERE), str(HERE.parent / "scripts")]
-from fast_media import VIDEO_SUFFIXES, prune_artifacts, publish_video, ready_do_folder, shrink_video  # noqa: E402
+from fast_media import (  # noqa: E402
+    VIDEO_SUFFIXES, clean_main, default_artifacts_root, mkdir_retry, prepare_artifacts_root, publish_video,
+    ready_do_folder, shrink_video,
+)
 import fast_evidence  # noqa: E402
 import fast_guard  # noqa: E402
 from fast_ui_map import record  # noqa: E402
@@ -905,11 +908,11 @@ def run_flow(args: argparse.Namespace) -> int:
             "stop it (`fastDeviceTest stop`) if it is yours, then rerun"
         )
 
-    project_root = Path(app.get("project_root", flow_path.parent)).expanduser()
-    root = (args.artifacts_root or project_root / "build/fast-device").expanduser().resolve()
+    project_root = (flow_path.parent / Path(app.get("project_root", ".")).expanduser()).resolve()
+    root = (args.artifacts_root or default_artifacts_root(project_root, "fast-device")).expanduser().resolve()
     artifacts = root / name / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{device['udid'][:8]}"
-    prune_artifacts(root, float(os.environ.get("FAST_UI_KEEP_DAYS", "3")))
-    artifacts.mkdir(parents=True, exist_ok=True)
+    prepare_artifacts_root(root, custom=args.artifacts_root is not None)
+    mkdir_retry(artifacts)
     prepared = prepare_flow(spec, appearance, content_size)
 
     if server_alive(device["udid"]):
@@ -1109,6 +1112,8 @@ def run_command(argv: list[str]) -> int:
 
 def main() -> int:
     argv = sys.argv[1:]
+    if argv[:1] == ["clean"]:
+        return clean_main(argv[1:])
     if argv and argv[0] in {"serve", "stop", "lock", "status", "do", "check", "build"}:
         return run_command(argv)
     return run_flow(parse_flow_arguments(argv))

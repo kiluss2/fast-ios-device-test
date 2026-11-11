@@ -25,7 +25,10 @@ from typing import Any, Callable, Iterator
 
 # bin/ holds symlinks in a git checkout but copies in the zip, so look beside scripts/ too.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent.parent / "scripts")]
-from fast_media import prune_artifacts, publish_video, ready_do_folder, shrink_video  # noqa: E402
+from fast_media import (  # noqa: E402
+    clean_main, default_artifacts_root, mkdir_retry, prepare_artifacts_root, prune_artifacts, publish_video,
+    ready_do_folder, shrink_video,
+)
 import fast_evidence  # noqa: E402
 from fast_guard import check_actions, parse_prompt_labels, risky_step  # noqa: E402
 import fast_vars  # noqa: E402
@@ -2250,7 +2253,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--artifacts-root", type=Path, default=os.environ.get("FAST_UI_ROOT") or None,
-        help="Where runs, screenshots and videos go (default <project_root>/build/fast-ui; env FAST_UI_ROOT)",
+        help="Where runs, screenshots and videos go (default ~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash>/fast-ui; env FAST_UI_ROOT)",
     )
     parser.add_argument(
         "--session", default=os.environ.get("FAST_UI_SESSION", ""),
@@ -2438,6 +2441,8 @@ def run_shutdown(argv: list[str]) -> int:
 
 def main() -> int:
     global TRAIL
+    if sys.argv[1:2] == ["clean"]:
+        return clean_main(sys.argv[2:])
     if sys.argv[1:2] == ["do"]:
         return run_do(sys.argv[2:])
     if sys.argv[1:2] == ["shutdown"]:
@@ -2471,7 +2476,7 @@ def main() -> int:
     artifacts_root = (
         Path(args.artifacts_root).expanduser().resolve()
         if args.artifacts_root
-        else project_root / "build/fast-ui"
+        else default_artifacts_root(project_root, "fast-ui")
     )
     artifacts = (
         args.artifacts.expanduser().resolve()
@@ -2479,8 +2484,8 @@ def main() -> int:
         else artifacts_root / name
         / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{udid[:8]}-{os.getpid()}"
     )
-    prune_artifacts(artifacts_root, float(os.environ.get("FAST_UI_KEEP_DAYS", "3")))
-    artifacts.mkdir(parents=True, exist_ok=True)
+    prepare_artifacts_root(artifacts_root, custom=bool(args.artifacts_root))
+    mkdir_retry(artifacts)
 
     def file_evidence(payload: dict[str, Any], video: Path | None) -> tuple[dict[str, Any], Path | None, str]:
         """File the run as PR evidence after its metrics.json is written; returns the payload and

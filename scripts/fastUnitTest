@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIRECTORY))
 RUNNER = SCRIPT_DIRECTORY / "fast_device_test.sh"
 DEFAULT_PROJECT = os.environ.get("FAST_TEST_PROJECT") or os.environ.get("FAST_IOS_PROJECT")
 DEFAULT_SCHEME = os.environ.get("FAST_TEST_SCHEME") or os.environ.get("FAST_IOS_SCHEME")
@@ -274,6 +275,11 @@ def main() -> int:
         raise ValueError(
             "provide a screen/flow/test scope, or use --all-tests explicitly"
         )
+
+    if not arguments.cache:
+        from fast_media import prepare_unit_cache
+
+        prepare_unit_cache()  # age out build caches unused for 30 days; never fails the run
 
     command = [
         str(RUNNER),

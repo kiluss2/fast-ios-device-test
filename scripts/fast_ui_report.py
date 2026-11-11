@@ -3,8 +3,8 @@
 """Collate fastUITest runs into one flow × simulator table (appearance / Dynamic Type variants
 run with --appearance / --content-size appear as their own `flow@dark@xxl` rows).
 
-    fast_ui_report.py --root <project>/build/fast-ui --session <name>
-    fast_ui_report.py --root <project>/build/fast-ui --since 20260908-140000
+    fast_ui_report.py --root <artifacts-root> --session <name>
+    fast_ui_report.py --root <artifacts-root> --since 20260908-140000
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def render(cells: dict[tuple[str, str], dict[str, Any]], attempts: dict[tuple[st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", type=Path, required=True, help="<project>/build/fast-ui")
+    parser.add_argument("--root", type=Path, required=True, help="artifacts root of the runs (the one fastSimulatorTest printed or `clean --list` shows)")
     parser.add_argument("--session", default="", help="Only runs tagged with this --session")
     parser.add_argument("--since", default="", help="Only runs at/after YYYYmmdd-HHMMSS")
     parser.add_argument("--json", action="store_true")

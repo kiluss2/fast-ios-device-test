@@ -55,7 +55,8 @@ Maintainers: `bash make-zip.sh` builds the release zip next to the folder.
 
 ## What's new
 
-See [CHANGELOG.md](CHANGELOG.md): 1.8.0 adds `two_finger_drag` on an iPhone (tilts a map). 1.7.0 files every passing flow run, and the bug's "before"
+See [CHANGELOG.md](CHANGELOG.md): 1.18.0 keeps run artifacts out of the project (a bounded cache
+with `clean`). 1.8.0 adds `two_finger_drag` on an iPhone (tilts a map). 1.7.0 files every passing flow run, and the bug's "before"
 run, as PR evidence in one folder per ticket on the Desktop, and keeps nothing heavy under
 `build/`. 1.6.0 reaches a screen visited before in one request
 (`fastUIMap --path-to`), reuses the iPhone runner for flows and trims every step (1.8 s on the

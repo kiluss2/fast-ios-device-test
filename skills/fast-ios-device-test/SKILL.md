@@ -61,7 +61,7 @@ Everything the engine needs is in the flow; there is no per-project config.
 - **Where flows live**: a ticket's flows go in `fastEvidenceSheet --folder <project_root>`'s
   `flows=` folder (`~/Desktop/<project> <ticket>/source/flows/`, created on the spot), so a later
   session finds them and they go when the user deletes the folder after the merge. Never under
-  `build/fast-ui` or `build/fast-device` (pruned after `FAST_UI_KEEP_DAYS`). Throwaway flows may
+  the default artifacts root (`~/Library/Caches/fast-ios-device-test/artifacts`, pruned after `FAST_UI_KEEP_DAYS`). Throwaway flows may
   stay in the session scratchpad.
 - Absolute paths only (a flow outside the repo must name `project_root`). `simulator` is a UDID from `xcrun simctl list devices available` that
   nobody else runs the app on. `derived_data` is the project's one `build/fast-ui-dd`, never

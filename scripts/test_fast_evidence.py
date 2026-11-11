@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fast_evidence as evidence  # noqa: E402
 import fast_evidence_sheet as sheet  # noqa: E402
+from fast_media import default_artifacts_root  # noqa: E402
 
 from PIL import Image  # noqa: E402
 
@@ -58,7 +59,9 @@ class Base(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.tmp = Path(directory.name).resolve()
         self.desktop = self.tmp / "Desktop"
-        patcher = mock.patch.dict(evidence.os.environ, {"FAST_EVIDENCE_DIR": str(self.desktop)}, clear=False)
+        self.artifacts_home = self.tmp / "artifacts-home"
+        patcher = mock.patch.dict(evidence.os.environ, {"FAST_EVIDENCE_DIR": str(self.desktop),
+                                                        "FAST_ARTIFACTS_HOME": str(self.artifacts_home)}, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
         for key in ("FAST_EVIDENCE", "FAST_EVIDENCE_TICKET", "FAST_EVIDENCE_PROJECT", "FAST_UI_KEEP_DAYS"):
@@ -308,7 +311,7 @@ class EngineTests(Base):
                 mock.patch.object(evidence, "simulator_name", return_value="iPhone 17"), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = fast_ui.main()
-        return code, out.getvalue(), err.getvalue(), next((root / "build/fast-ui/gating-off").iterdir())
+        return code, out.getvalue(), err.getvalue(), next((default_artifacts_root(root, "fast-ui") / "gating-off").iterdir())
 
     def test_a_simulator_pass_is_filed_and_emptied(self) -> None:
         root = repo(self.tmp)
@@ -337,14 +340,15 @@ class EngineTests(Base):
         self.assertIn("evidence_error=OSError: disk full", out)
         self.assertTrue((run / "main.png").exists())
 
-    def run_device(self, root: Path, report: dict, *argv: str) -> tuple[int, str]:
+    def run_device(self, root: Path, report: dict, *argv: str, project_root: str | None = None) -> tuple[int, str]:
         import contextlib
         import io
         import fast_device
         flow = root / "flows/home.json"
         flow.parent.mkdir(exist_ok=True)
         flow.write_text(json.dumps({"version": 1, "name": "home", "app": {"bundle_id": "com.example.app",
-                                    "project_root": str(root)}, "actions": [{"type": "screenshot", "name": "home"}]}))
+                                    "project_root": project_root if project_root is not None else str(root)},
+                                    "actions": [{"type": "screenshot", "name": "home"}]}))
         device = {"udid": "U0000000", "name": "Test iPhone", "os": "26.0", "connected": True}
         out = io.StringIO()
         with mock.patch.object(fast_device, "resolve_device", return_value=device), \
@@ -371,18 +375,35 @@ class EngineTests(Base):
         self.assertIn(f"evidence={folder.as_uri()}", out)
         cells = json.loads((folder / "source/sheet.json").read_text())["cells"]
         self.assertEqual([cell["label"] for cell in cells], ["home · Test iPhone"])
-        run = next((root / "build/fast-device/home").iterdir())
+        run = next((default_artifacts_root(root, "fast-device") / "home").iterdir())
         self.assertEqual([path.name for path in run.iterdir()], ["metrics.json"])
+
+    def test_a_relative_project_root_is_relative_to_the_flow_not_the_working_directory(self) -> None:
+        import os
+        root = repo(self.tmp)
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        before = os.getcwd()
+        os.chdir(elsewhere)
+        try:
+            self.run_device(root, {"status": "pass", "results": [], "labels": []}, project_root="..")
+        finally:
+            os.chdir(before)
+        self.assertTrue((default_artifacts_root(root, "fast-device") / "home").is_dir())
+        self.assertFalse((default_artifacts_root(elsewhere, "fast-device")).exists())
 
     def test_iphone_runs_prune_old_run_folders(self) -> None:
         import os
         import time
         root = repo(self.tmp)
-        old = root / "build/fast-device/home/20260101-000000-U0000000"
+        self.artifacts_home.mkdir(parents=True)
+        (self.artifacts_home / ".fast-ios-device-test-artifacts").touch()  # a home the tool owns
+        old = default_artifacts_root(root, "fast-device") / "home/20260101-000000-U0000000"
         old.mkdir(parents=True)
         (old / "metrics.json").write_text("{}")
         stale = time.time() - 4 * 86400
         os.utime(old, (stale, stale))
+        os.utime(old / "metrics.json", (stale, stale))
         self.run_device(root, {"status": "pass", "results": [], "labels": []})
         self.assertFalse(old.exists())
 

@@ -14,7 +14,7 @@ skill (`~/.claude/skills/fast-ios-device-test/references/review.md`). The tool i
 ```
 
 - The artifacts root is the `--artifacts-root` the session was run with
-  (default `<project>/build/fast-ui`).
+  (default `~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash>/fast-ui`; `fastSimulatorTest clean --list` shows it).
 - Run the tool once, then Read EVERY contact sheet it lists. Do not sample.
   Each sheet's header carries the flow's `expect`; judge the frames against it.
 - Fill `review-notes-<session>.json` (written by the tool) for each case:

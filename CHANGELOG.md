@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.18.0 — 2026-11-21
+
+### Run artifacts no longer land inside the project
+
+- Default artifacts root moved from `<project_root>/build/fast-ui|fast-device` to
+  `~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash of path>/{fast-ui,fast-device}`
+  (`FAST_ARTIFACTS_HOME`). A repo that does not ignore `build/` no longer shows hundreds of
+  untracked files. `--artifacts-root`, `FAST_UI_ROOT`, `FAST_DEVICE_ROOT` work as before.
+- It cannot grow forever: each run on the default root deletes every project's runs older than
+  `FAST_UI_KEEP_DAYS` (3; now shared by all projects), then the oldest runs until the run folders
+  fit `FAST_ARTIFACTS_MAX_MB` (2048; `0` disables). Silent unless the size cap deleted something (one
+  `NOTE` line on stderr). A custom root is only age-pruned, as before.
+- Deletion is deliberately narrow (found in review). A home is refused when it is a relative path,
+  `/`, your home folder or a parent of it (compared by filesystem identity, so letter case cannot
+  hide it), the helper cache, a git checkout or a symlink, when the artifacts home and the build
+  cache home are the same folder or nested, or when it holds files (`.DS_Store` aside) without the
+  `.fast-ios-device-test-artifacts` marker. Only an absent or empty home is created and marked, by
+  the launcher or by `fast_device_test.sh`; the shell never marks a folder that has files.
+  Only `<project>-<hash8>/<fast-ui|fast-device>/<task>/<timestamp>-… run folders and `final.mp4` /
+  `final-<session>.mp4` are deleted; symlinks are never followed; a run with any file written in the
+  last 30 minutes (`FAST_ARTIFACTS_PROTECT_MIN`) is never deleted, by age, cap or `clean`. Age is
+  the newest file inside a run, not the folder's own time. Bad or non-finite `FAST_*` numbers fall
+  back to the defaults. A live run that writes nothing for more than 30 minutes is not protected.
+- A custom root (`--artifacts-root`, `FAST_UI_ROOT`, `FAST_DEVICE_ROOT`) is still only age-pruned
+  by `prune_artifacts`, now with the same run-name rule, the 30 minute protection, and no deleting
+  under `/`, your home folder or a parent of it; it only removes task folders it emptied itself.
+  It has no marker rule: do not point it at a folder that holds run-named folders you want to keep.
+- Run folders are created with a retry, so another run's cleanup removing an empty parent in
+  between cannot crash a starting run.
+- `fastSimulatorTest clean` / `fastDeviceTest clean` (`--list` default, `--all`, `--days N`,
+  `--project TEXT`, `--dry-run`) show size per project and delete by hand.
+- `fastUnitTest`'s build cache default moved from `<project>/build/fast-device-tests` to
+  `~/Library/Caches/fast-ios-device-test/unit-tests/<project>-<hash>/<scheme-config-device>`
+  (`FAST_UNIT_TESTS_HOME`). It holds a full build, so it is aged out only after
+  `FAST_UNIT_CACHE_DAYS` (30; `0` keeps it) unused. Last use is the newest time of the cache
+  folder, its `source.fingerprint`, its `logs` folder and the log files in it, so a long build that
+  keeps appending to its log counts as in use; a cache used in the last 30 minutes is never
+  deleted. Same ownership rules as above, and only a folder that holds `DerivedData`,
+  `source.fingerprint` or `logs` counts as a build cache. `clean --list` shows each cache
+  with its size and last use; `clean --builds [--days N] [--project T] [--dry-run]` deletes them
+  (the next test run rebuilds); `clean --all` stays for run artifacts only.
+- `fastDeviceTest`: a relative `app.project_root` in a flow is now relative to the flow file, as
+  `fastSimulatorTest` already did; it was relative to the working directory, so the project folder
+  (and its artifacts home) changed with where the command was run.
+- Upgrading: old `<project>/build/fast-ui`, `build/fast-device` and `build/fast-device-tests`
+  folders are left alone; delete them. The build folder `build/fast-ui-dd` (1.16.0) is unchanged.
+- The default `do` folder (`~/Library/Caches/fast-ui/do`, 1.17.0) keeps its own pruning and is not
+  part of the artifacts home or `clean`.
+
 ## 1.17.0 — 2026-11-13
 
 - iPhone: runner builds unused for 14 days are deleted when a runner starts

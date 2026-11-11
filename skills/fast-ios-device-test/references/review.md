@@ -45,8 +45,8 @@ last second of each clip) and prints `COMBINED ... OK|MISMATCH` comparing the
 manifest timeline with the file's duration. Read both sheets: order 01→N and
 every end frame against its title's expectation.
 
-Keep the artifacts root outside `build/` (`--artifacts-root`, `FAST_UI_KEEP_DAYS=0`)
-so the videos survive the next build and live beside the report.
+Keep the artifacts root somewhere durable (`--artifacts-root`, `FAST_UI_KEEP_DAYS=0`) so the
+videos survive the 3-day prune and the size cap and live beside the report.
 
 Two things that spoil recordings: another Xcode run on the same simulator
 (`testmanagerd` installs its app over yours and the review sheet loses the

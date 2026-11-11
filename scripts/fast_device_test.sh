@@ -137,7 +137,20 @@ case "$PROJECT_PATH" in
 esac
 
 PROJECT_ROOT="$(dirname "$PROJECT_PATH")"
-[[ -n "$CACHE_ROOT" ]] || CACHE_ROOT="$PROJECT_ROOT/build/fast-device-tests"
+# Build cache stays out of the project (a repo should not collect DerivedData). One folder per
+# project path under a home that carries the marker fast_media.py needs before it will age out
+# caches unused for FAST_UNIT_CACHE_DAYS (30).
+if [[ -z "$CACHE_ROOT" ]]; then
+    UNIT_HOME="${FAST_UNIT_TESTS_HOME:-$HOME/Library/Caches/fast-ios-device-test/unit-tests}"
+    PROJECT_KEY="$(printf '%s' "$PROJECT_ROOT" | shasum | cut -c1-8)"
+    CACHE_ROOT="$UNIT_HOME/$(printf '%s' "$(basename "$PROJECT_ROOT")" | tr -cs '[:alnum:]._' '-')-$PROJECT_KEY"
+    # Mark the home only when it is new or empty (ignoring .DS_Store): a folder that already holds
+    # your files must never become one the tool cleans.
+    if [[ ! -e "$UNIT_HOME/.fast-ios-device-test-artifacts" ]] \
+        && [[ ! -d "$UNIT_HOME" || -z "$(ls -A "$UNIT_HOME" 2>/dev/null | grep -v '^\.DS_Store$')" ]]; then
+        mkdir -p "$UNIT_HOME" && : > "$UNIT_HOME/.fast-ios-device-test-artifacts"
+    fi
+fi
 
 device_rows() {
     xcrun devicectl list devices 2>/dev/null \
