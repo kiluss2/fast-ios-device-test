@@ -9,6 +9,7 @@ import importlib.util
 import io
 import itertools
 import json
+import os
 import plistlib
 import shutil
 import subprocess
@@ -1799,12 +1800,12 @@ class RunLifecycleTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def run_main(self, actions: list, setup: dict | None = None, argv: tuple[str, ...] = (),
-                 axe: object = None) -> tuple[int, list[list[str]], str, str]:
+                 axe: object = None, app: dict | None = None) -> tuple[int, list[list[str]], str, str]:
         with tempfile.TemporaryDirectory() as raw:
             flow = Path(raw) / "home.json"
             flow.write_text(json.dumps({"version": 1, "name": "home", "actions": actions, "setup": setup or {},
                                         "app": {"bundle_id": "com.example.app", "prebuilt": True, "simulator": "SIM",
-                                                "project_root": raw}}))
+                                                "project_root": raw, **(app or {})}}))
             calls: list[list[str]] = []
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow), *argv]), \
@@ -1847,6 +1848,34 @@ class RunLifecycleTests(unittest.TestCase):
                                             {"fresh_install": False, "preferences": {"isPremium": True}})
         self.assertEqual(code, 0, out)
         self.assertEqual(calls[-1], ["xcrun", "simctl", "spawn", "SIM", "defaults", "write", "com.example.app", "isPremium", "<false/>"])
+
+    def test_location_is_granted_after_a_fresh_install_and_before_launch(self) -> None:
+        # An uninstall drops the app's location grant: a grant made before the run is gone by launch.
+        code, calls, out, _ = self.run_main([{"type": "wait", "label": "Go"}],
+                                            {"fresh_install": True, "location": "37.6547,-122.4077"},
+                                            app={"app_path": "Demo.app"})
+        self.assertEqual(code, 0, out)
+        install = calls.index(["xcrun", "simctl", "install", "SIM", "None"])
+        grant = calls.index(["xcrun", "simctl", "privacy", "SIM", "grant", "location", "com.example.app"])
+        place = calls.index(["xcrun", "simctl", "location", "SIM", "set", "37.6547,-122.4077"])
+        launch = next(index for index, call in enumerate(calls) if call[:3] == ["xcrun", "simctl", "launch"])
+        self.assertLess(install, grant)
+        self.assertLess(grant, place)
+        self.assertLess(place, launch)
+
+    def test_location_from_the_environment_when_the_flow_names_none(self) -> None:
+        with mock.patch.dict(os.environ, {"FAST_UI_LOCATION": "10.0,20.0"}):
+            _, calls, _, _ = self.run_main([{"type": "wait", "label": "Go"}], {"fresh_install": True},
+                                          app={"app_path": "Demo.app"})
+        self.assertIn(["xcrun", "simctl", "privacy", "SIM", "grant", "location", "com.example.app"], calls)
+        self.assertIn(["xcrun", "simctl", "location", "SIM", "set", "10.0,20.0"], calls)
+
+    def test_no_location_grants_nothing(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FAST_UI_LOCATION", None)
+            _, calls, _, _ = self.run_main([{"type": "wait", "label": "Go"}], {"fresh_install": True},
+                                          app={"app_path": "Demo.app"})
+        self.assertFalse([call for call in calls if "privacy" in call or call[2:3] == ["location"]])
 
     def test_relaunch_false_keeps_a_running_app(self) -> None:
         _, calls, _, _ = self.run_main([{"type": "wait", "label": "Go"}], {"fresh_install": False, "relaunch": False})

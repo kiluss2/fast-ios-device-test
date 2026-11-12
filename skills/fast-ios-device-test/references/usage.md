@@ -196,9 +196,12 @@ Supported actions:
 - `type_text`: type `text` into the focused field (US keyboard characters).
 - `launch` / `terminate`: `simctl launch` / `terminate` the flow's app, or `"app":
   "<bundle id>"`; `launch` takes `launch_arguments`.
-- `open_url`: `simctl openurl` with `url` (deep links, universal links). It hands the link straight
-  to the app, with no prompt. A link tapped in Safari raises "Open in “<App>”?" (`Cancel` / `Open`)
-  instead; Safari's page content is not in the accessibility tree, so tap the link with `tap_point`.
+- `open_url`: `simctl openurl` with `url`. A custom-scheme link (`myapp://…`) goes straight to the
+  app, with no prompt. An https link goes to the app only when the installed build's Associated
+  Domains claim that domain; otherwise Safari opens the page, and a page that hands over to the
+  app's scheme makes Safari ask "Open this page in “<App>”?" (`Cancel` / `Open`), so wait for that
+  text and tap `Open`. Safari's
+  page content is not in the accessibility tree: tap a link on the page with `tap_point`.
 
 Any tap or swipe may carry `"settle": true` (or a number of seconds, default 2.5): after the
 gesture the engine polls until two consecutive hierarchies match, then continues. It costs the
@@ -337,6 +340,11 @@ A flow with `"fresh_install": false` relaunches the app (`simctl launch
 --terminate-running-process`), so it starts from the app's first screen; `"relaunch": false` in
 `setup` brings a running app to the front as before.
 
+`"location": "37.6547,-122.4077"` in `setup` (or `FAST_UI_LOCATION` in the environment, which
+ui-gate sets from its manifest) grants the app location and puts the Simulator there after the
+install and before launch: an uninstall drops the app's grant, so a grant made before the run is
+gone by launch and the app asks again. `fastDeviceTest` ignores it (an iPhone keeps its own place).
+
 ## Host steps and variables (Simulator)
 
 A flow can run a command on the Mac between screen steps: another phone's server calls (a second
@@ -371,6 +379,13 @@ output fills `${name}` in later steps.
   `WARN undo …` and does not fail the run. Each declared undo is written to the simulator's
   journal, so a run killed with SIGKILL has it run by the next run's repair
   (`repaired …, undo`), or by the next `fastSimulatorTest do` on that simulator. An `undo` action runs its command now; its failure fails the step.
+- An undo that brings the network back runs before the undos declared ahead of it (a cleanup
+  that calls the server), so it waits until the server answers again
+  (`["/bin/sh", "-c", "networksetup -setairportpower en1 on; for i in $(seq 40); do curl -s -o /dev/null -m 3 https://<server> && exit 0; sleep 1; done; exit 1"]`).
+- Wi-Fi off is not offline when the Mac has another way out: an iPhone on USB (tethering, an
+  `en` port of its own) or Ethernet keeps the app online. Follow the Wi-Fi-off step with a host
+  step that fails while the server still answers, so the run fails instead of capturing an
+  online screen as the offline state.
 - `fastSimulatorTest do` runs host steps too and takes `--vars '<json object>'`; its line ends
   with ` vars={…}` (pass it to the next request's `--vars`) and ` undo_pending=[[…]]`: a `do`
   runs no undo, so send each one later as `{"type":"undo","run":[…]}`.

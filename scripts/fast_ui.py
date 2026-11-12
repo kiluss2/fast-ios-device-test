@@ -1437,6 +1437,13 @@ def write_preference(udid: str, domain: str, key: str, value: Any) -> None:
     command(args)
 
 
+def place_location(udid: str, bundle_id: str, location: str) -> None:
+    """Grants location and puts the Simulator at "lat,lon". After the install: an uninstall drops the
+    app's grant, so one made before the run is gone by launch and the app asks again."""
+    command(["xcrun", "simctl", "privacy", udid, "grant", "location", bundle_id])
+    command(["xcrun", "simctl", "location", udid, "set", location])
+
+
 def set_preferences(udid: str, bundle_id: str, preferences: dict[str, Any]) -> None:
     if not preferences:
         return
@@ -2494,6 +2501,9 @@ def main() -> int:
                 if lease is not None and saved_prefs:
                     lease.touch("preferences_saved", saved_prefs)
             set_preferences(udid, bundle_id, setup.get("preferences", {}))
+            location = setup.get("location") or os.environ.get("FAST_UI_LOCATION")
+            if location:
+                place_location(udid, bundle_id, str(location))
             if recorder:
                 recorder.start()
             launch = ["xcrun", "simctl", "launch", udid, bundle_id]

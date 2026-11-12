@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.14.1 — 2026-11-12
+
+- Simulator: `setup.location` ("lat,lon"), or `FAST_UI_LOCATION`, grants the app location and sets
+  the Simulator's place after the install and before launch, so a fresh install no longer drops a
+  grant made before the run (the app's own location prompt or sheet then never shows).
+- Docs: `open_url` with an https link reaches the app only through Associated Domains; otherwise
+  Safari asks "Open this page in “<App>”?". Host steps: an undo that restores the network waits for
+  the server, and a Wi-Fi-off step needs a check that the Mac is really offline (an iPhone on USB
+  keeps it online).
+
 ## 1.14.0 — 2026-11-12
 
 - Simulator flows: a `host` step runs a command on the Mac (argv, no shell, in the flow's `cwd`)
