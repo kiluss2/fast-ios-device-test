@@ -71,6 +71,9 @@ Everything the engine needs is in the flow; there is no per-project config.
   `double_tap`, `scroll_to` (gestures such as `drag`, `pinch`, `set_slider` are in usage.md):
   `label` (exact), `label_contains`, `id` (accessibilityIdentifier), `value` (a switch's "1"/"0",
   a field's text), `element_type`, `label_is_empty`, `frame` bounds (`{"min_y": 400}`).
+- A command on the Mac between steps (another phone's server calls, Wi-Fi off), with its JSON
+  output as `${name}` in later steps and an `undo` when the flow ends: `host` (Simulator only),
+  "Host steps and variables" in usage.md. `label_matches` takes a regular expression.
 - `tap_label` matches a `Button`; when the flow sets no `element_type` and exactly one node of
   any type has the label, it taps that node and reports `fallback_type`.
 

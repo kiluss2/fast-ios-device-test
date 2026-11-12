@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.14.0 — 2026-11-12
+
+- Simulator flows: a `host` step runs a command on the Mac (argv, no shell, in the flow's `cwd`)
+  and keeps fields of its JSON output as `${name}` for later steps; its `undo` runs when the flow
+  ends, last first, before teardown, and is journaled so a killed run's repair runs it. An `undo`
+  action runs a command now. Flow keys `vars` and `cwd`; built-ins `${udid}`, `${bundle_id}`,
+  `${flow_dir}`.
+- `wait` with `"save": {"var": …}` keeps the first match's label; selector key `label_matches`
+  (regular expression).
+- `fastSimulatorTest do --vars '<json>'`; its line ends with ` vars=` and ` undo_pending=`.
+- `fastDeviceTest` refuses `host`, `undo` and `save` with "host steps run on the simulator only", and
+  `${…}` and `label_matches`, which its runner does not support.
+- `fastSimulatorTest do` repairs a killed run's journal first (its undos included), as a flow run does.
+
 ## 1.13.0 — 2026-11-11
 
 - Simulator: on a kept install (`fresh_install: false`) a seeded `setup.preferences` key that

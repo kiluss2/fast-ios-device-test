@@ -33,6 +33,58 @@ def check_actions(actions: list[Any]) -> None:
             raise ValueError(f"step {index}: each action must be a JSON object")
         if "expect" in action and not isinstance(action["expect"], dict):
             raise ValueError(f"step {index}: expect must be a selector object, such as {{\"label\": \"About\"}}")
+        host_shape(action, index)
+        for selector in (action, action.get("expect") or {}):
+            pattern = selector.get("label_matches")
+            if pattern is None:
+                continue
+            try:
+                re.compile(str(pattern))
+            except re.error as error:
+                raise ValueError(f"step {index}: label_matches {pattern!r} is not a regular expression ({error})") from None
+
+
+def strings(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(part, str) and part for part in value)
+
+
+def host_shape(action: dict[str, Any], index: int) -> None:
+    """`host`: `run` an argv list, `save` {variable: JSON path}, `undo` an argv list, `timeout` > 0;
+    `undo`: `run`; a `wait` keeps what it found with `save` {"var": name}."""
+    kind = action.get("type")
+    if kind in ("host", "undo") and not strings(action.get("run")):
+        raise ValueError(f"step {index}: {kind} needs \"run\": a list of strings (argv, no shell)")
+    if kind == "host":
+        save = action.get("save", {})
+        if not isinstance(save, dict) or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in save.items()):
+            raise ValueError(f"step {index}: host \"save\" maps variable names to JSON paths, such as {{\"code\": \"code\"}}")
+        if "undo" in action and not strings(action["undo"]):
+            raise ValueError(f"step {index}: host \"undo\" is a list of strings (argv, no shell)")
+        timeout = action.get("timeout", 30)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError(f"step {index}: host \"timeout\" is a number of seconds above 0")
+    if "save" in action and kind != "host":
+        save = action["save"]
+        if kind != "wait" or not isinstance(save, dict) or set(save) != {"var"} or not isinstance(save["var"], str):
+            raise ValueError(f"step {index}: only a wait keeps what it found: \"save\": {{\"var\": \"<name>\"}}")
+
+
+SIMULATOR_ONLY = "host steps run on the simulator only"
+
+
+def refuse_host(actions: list[Any]) -> None:
+    """An iPhone run is one XCUITest request: no Mac command, undo or saved value in the middle of it,
+    and its runner neither fills in `${…}` (it would type the name) nor knows `label_matches` (a wait
+    on it would pass at once, so the wrong state is captured)."""
+    for index, action in enumerate(actions, start=1):
+        if not isinstance(action, dict):
+            continue
+        if action.get("type") in ("host", "undo") or "save" in action:
+            raise ValueError(f"step {index}: {SIMULATOR_ONLY} (fastSimulatorTest)")
+        if re.search(r"\$\{[A-Za-z_]", json.dumps(action)):
+            raise ValueError(f"step {index}: ${{…}} variables run on the simulator only (fastSimulatorTest)")
+        if "label_matches" in action or "label_matches" in (action.get("expect") or {}):
+            raise ValueError(f"step {index}: label_matches runs on the simulator only (fastSimulatorTest)")
 
 
 def risky_step(actions: list[dict[str, Any]]) -> tuple[int, str] | None:

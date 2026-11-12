@@ -28,6 +28,8 @@ sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve
 from fast_media import prune_artifacts, publish_video, shrink_video  # noqa: E402
 import fast_evidence  # noqa: E402
 from fast_guard import check_actions, parse_prompt_labels, risky_step  # noqa: E402
+import fast_vars  # noqa: E402
+from fast_vars import FlowVars  # noqa: E402
 from fast_ui_map import NOISE_LABEL, SCROLL_BAR_LABEL, Trail, record  # noqa: E402
 
 
@@ -323,7 +325,7 @@ def selector_hints(selector: dict[str, Any], nodes: list[dict[str, Any]]) -> str
     return f"; closest labels: [{', '.join(close[:3])}]" if close else ""
 
 
-SELECTOR_KEYS = ("label", "label_contains", "label_is_empty", "id", "value", "element_type", "enabled", "frame")
+SELECTOR_KEYS = ("label", "label_contains", "label_matches", "label_is_empty", "id", "value", "element_type", "enabled", "frame")
 
 
 def selector_of(action: dict[str, Any], default_type: str | None = None) -> dict[str, Any]:
@@ -348,6 +350,9 @@ def matches(node: dict[str, Any], selector: dict[str, Any]) -> bool:
         return False
     fragment = selector.get("label_contains")
     if fragment is not None and fragment not in str(node.get("AXLabel") or ""):
+        return False
+    pattern = selector.get("label_matches")
+    if pattern is not None and not re.search(str(pattern), str(node.get("AXLabel") or "")):
         return False
     expected_type = selector.get("element_type")
     if expected_type is not None and node_type(node) != expected_type:
@@ -961,6 +966,11 @@ class SimulatorLease:
     def repair(self, previous: dict[str, Any]) -> None:
         """Undo what a killed run recorded; best effort, every step independent."""
         udid = self.udid
+        # A Mac change first (the Wi-Fi a host step turned off): everything after may need it back.
+        for entry in reversed(previous.get("undo") or []):
+            warning = fast_vars.run_undo([str(part) for part in entry.get("run") or []], Path(entry.get("cwd") or "."))
+            if warning:
+                print(warning, file=sys.stderr)
         stop_stale_recorder(udid)
         if previous.get("ui"):
             restore_ui_settings(udid, previous["ui"])
@@ -968,7 +978,7 @@ class SimulatorLease:
         if bundle_id:
             command(["xcrun", "simctl", "terminate", udid, bundle_id], check=False)
             restore_preferences(udid, bundle_id, previous.get("preferences") or [], previous.get("preferences_saved") or {})
-        self.repaired = [key for key in ("ui", "bundle_id", "preferences") if previous.get(key)]
+        self.repaired = [key for key in ("ui", "bundle_id", "preferences", "undo") if previous.get(key)]
         print(
             f"WARN dirty=1: previous run pid {previous.get('pid', '?')} ({previous.get('flow', '?')}) "
             f"was killed before teardown; repaired {', '.join(self.repaired) or 'recorder'}",
@@ -996,6 +1006,16 @@ def ensure_not_busy(udid: str) -> None:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise FastUIError(f"simulator busy: {udid} is running a fastSimulatorTest flow; wait for it") from None
+        # A flow killed with SIGKILL left its changes (the Wi-Fi a host step turned off, a dark mode):
+        # the agent's next request is usually a `do`, so it repairs from the journal as a flow run does.
+        lease = SimulatorLease(udid, Path("do"))
+        lease.handle = handle
+        previous = lease.read()
+        if previous.get("dirty"):
+            lease.repair(previous)
+            lease.journal = {**previous, "dirty": 0, "undo": [], "repaired_by": "do"}
+            lease.save()
+        lease.handle = None
         fcntl.flock(handle, fcntl.LOCK_UN)
 
 
@@ -1650,6 +1670,31 @@ def press_keys(udid: str, codes: list[int]) -> None:
     axe(udid, "batch", *KEY_LEAD, *steps, "--step", f"sleep {KEY_SETTLE}")
 
 
+def run_step(action: dict[str, Any], index: int, flow_vars: FlowVars,
+             execute: Callable[[dict[str, Any]], dict[str, Any] | None]) -> dict[str, Any] | None:
+    """One step with its variables filled in: a `host`/`undo` runs on the Mac, any other on the screen;
+    a `wait` with `save` keeps what it found under its variable."""
+    try:
+        expanded = flow_vars.expand(action, index)
+        hosted = flow_vars.step(expanded, index)
+    except fast_vars.VarError as error:
+        raise FastUIError(str(error)) from None
+    if hosted is not None:
+        return hosted
+    result = execute(expanded)
+    if expanded.get("save") and result and "found" in result:
+        name = expanded["save"]["var"]
+        flow_vars.variables[name] = result.pop("found")
+        result["saved"] = [name]
+    return result
+
+
+def flow_variables(spec: dict[str, Any], base: Path, udid: str, bundle_id: str) -> FlowVars:
+    """The flow's `vars` and the built-ins `${udid}`, `${bundle_id}` and `${flow_dir}` (its `cwd`)."""
+    cwd = resolved_path(str(spec.get("cwd") or "."), base)
+    return FlowVars({**(spec.get("vars") or {}), "udid": udid, "bundle_id": bundle_id, "flow_dir": str(cwd)}, cwd)
+
+
 def execute_action(
     action: dict[str, Any],
     udid: str,
@@ -1727,7 +1772,12 @@ def run_action(
     post_delay = float(action.get("post_delay", 0.15))
 
     if kind == "wait":
-        wait_selector(udid, action, timeout, optional_prompt_labels)
+        nodes = wait_selector(udid, action, timeout, optional_prompt_labels)
+        if action.get("save"):
+            # What the app made up (a room code) for later steps: the first match, top-left first.
+            found = sort_nodes([node for node in nodes if matches(node, selector_of(action))], ["y", "x"])
+            if found:
+                return {"found": str(found[0].get("AXLabel") or found[0].get("AXValue") or "")}
     elif kind in IPHONE_ONLY:
         raise FastUIError(f"{kind} works on an iPhone only, not on the Simulator: {IPHONE_ONLY[kind]}")
     elif kind in ("long_press", "double_tap") and "x" in action and "y" in action:
@@ -2198,6 +2248,7 @@ def run_do(argv: list[str]) -> int:
                         help="Bundle id for launch/terminate and the screen map (env FAST_UI_APP)")
     parser.add_argument("--out", type=Path, default=DO_OUT, help=f"Where screenshots and dumps go (default {DO_OUT})")
     parser.add_argument("--prompt-labels", help='Prompt buttons this request may tap on its own, as for fastDeviceTest do')
+    parser.add_argument("--vars", help='Variables for ${name} in the actions, as a JSON object (the vars= of an earlier do)')
     args = parser.parse_args(argv)
     # Input refused before anything runs goes to stderr, as `fastDeviceTest do` prints it.
     if not args.simulator:
@@ -2208,6 +2259,9 @@ def run_do(argv: list[str]) -> int:
         actions = parsed if isinstance(parsed, list) else [parsed]
         check_actions(actions)
         prompts = parse_prompt_labels(args.prompt_labels) if args.prompt_labels else []
+        given = json.loads(args.vars) if args.vars else {}
+        if not isinstance(given, dict) or not all(isinstance(value, (str, int, float)) for value in given.values()):
+            raise ValueError("--vars must be a JSON object of strings")
     except ValueError as error:
         print(f"FAIL error={error}", file=sys.stderr)
         return 1
@@ -2217,6 +2271,8 @@ def run_do(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
     udid = args.simulator
+    builtins = {"udid": udid, "bundle_id": args.app, "flow_dir": str(Path.cwd())}
+    flow_vars = FlowVars({**given, **builtins}, Path.cwd())
     try:
         ensure_not_busy(udid)
     except FastUIError as error:
@@ -2228,15 +2284,25 @@ def run_do(argv: list[str]) -> int:
     failed: tuple[int, dict[str, Any], Exception] | None = None
     read_error: Exception | None = None
 
+    hosted: dict[int, dict[str, Any]] = {}
+
     def run_steps() -> tuple[tuple[int, dict[str, Any], Exception] | None, list[dict[str, Any]]]:
         done: list[dict[str, Any]] = []
         for index, action in enumerate(actions, start=1):
+            if index in hosted:
+                # A host step already ran on the Mac before the simulator was found shut down: its
+                # variables are kept, and running it twice would make its server call twice.
+                done.append(hosted[index])
+                continue
             try:
-                result = execute_action(action, udid, args.out, index, prompts, {}, args.app)
+                result = run_step(action, index, flow_vars,
+                                  lambda expanded: execute_action(expanded, udid, args.out, index, prompts, {}, args.app))
             except (FastUIError, OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError) as error:
                 return (index, action, error), done
             if result:
                 done.append({"step": index, **result})
+                if action.get("type") in fast_vars.HOST_TYPES:
+                    hosted[index] = done[-1]
         return None, done
 
     try:
@@ -2274,8 +2340,19 @@ def run_do(argv: list[str]) -> int:
     line += unsettled_note(results)
     if dumps:
         line += f" ui={','.join(map(file_link, dumps))}"
+    line += do_vars_note(flow_vars, builtins)
     print(f"{line} labels={json.dumps(labels, ensure_ascii=False)}")
     return 1 if failed else 0
+
+
+def do_vars_note(flow_vars: FlowVars, builtins: dict[str, str]) -> str:
+    """` vars=` for the next request's `--vars` and ` undo_pending=` for the agent to run (a `do` runs no undo)."""
+    compact = {"ensure_ascii": False, "separators": (",", ":")}
+    kept = {key: value for key, value in flow_vars.variables.items() if key not in builtins or value != builtins[key]}
+    note = f" vars={json.dumps(kept, **compact)}" if kept else ""
+    if flow_vars.undo:
+        note += f" undo_pending={json.dumps(flow_vars.pending(), **compact)}"
+    return note
 
 
 def run_shutdown(argv: list[str]) -> int:
@@ -2314,6 +2391,10 @@ def main() -> int:
         raise FastUIError(f"cannot read flow {flow_path}: {error}") from error
     if spec.get("version") != 1:
         raise FastUIError("flow version must be 1")
+    try:
+        check_actions(spec.get("actions") or [])
+    except ValueError as error:
+        raise FastUIError(f"flow {flow_path.name}: {error}") from error
 
     base = flow_path.parent
     app = required(spec, "app", "flow")
@@ -2368,6 +2449,7 @@ def main() -> int:
     labels_per_step: list[dict[str, Any]] = []
     previous_ui: dict[str, str] = {}
     saved_prefs: dict[str, str] = {}
+    flow_vars = flow_variables(spec, base, udid, bundle_id)
     lease: SimulatorLease | None = None
     if not args.build_only:
         # One run per simulator: a second run on the same UDID would interleave taps.
@@ -2429,9 +2511,12 @@ def main() -> int:
         for index, action in enumerate(required(spec, "actions", "flow"), start=1):
             current_step = f"{index:02d}_{action.get('type', 'unknown')}"
             with metrics.measure(current_step):
-                result = execute_action(
-                    action, udid, artifacts, index, optional_prompt_labels, defaults, bundle_id
-                )
+                result = run_step(action, index, flow_vars, lambda expanded: execute_action(
+                    expanded, udid, artifacts, index, optional_prompt_labels, defaults, bundle_id
+                ))
+            if lease is not None and flow_vars.undo:
+                # A SIGKILL skips the `finally`: the next run on this simulator runs these from the journal.
+                lease.touch("undo", list(flow_vars.undo))
             if recorder:
                 labels_per_step.append(step_labels(udid, current_step, recorder.elapsed(), result))
             if result:
@@ -2528,7 +2613,10 @@ def main() -> int:
         for sig in previous_handlers:
             signal.signal(sig, signal.SIG_IGN)
         try:
+            for warning in flow_vars.run_undos():
+                print(warning, file=sys.stderr)
             if lease is not None:
+                lease.touch("undo", [])
                 teardown(udid, bundle_id, previous_ui, setup.get("preferences", {}), fresh_install, args.keep_state,
                          saved_prefs)
                 torn_down = True

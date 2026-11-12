@@ -223,7 +223,8 @@ runner, so a longer settle time is expressed directly rather than by chaining
 gestures. Prefer `pause` over a one-pixel `swipe` when a flow only needs to wait:
 a swipe can scroll the screen it was meant to leave alone.
 
-Selectors accept `label`, `label_contains`, `label_is_empty`, `id` (the
+Selectors accept `label`, `label_contains`, `label_matches` (a regular expression searched in the
+label; Simulator only), `label_is_empty`, `id` (the
 accessibilityIdentifier, `AXUniqueId`), `value` (`AXValue`: "1"/"0" for a switch, the text of
 a field), `element_type`, `enabled` (`false` matches a disabled button: "Continue stays disabled
 until the form is valid"; a dump marks such nodes `"enabled": false`), and bounds nested under `frame`, such as `{"frame": {"min_y": 400,
@@ -335,6 +336,50 @@ cannot clean up: the next run on that simulator repairs from the journal first a
 A flow with `"fresh_install": false` relaunches the app (`simctl launch
 --terminate-running-process`), so it starts from the app's first screen; `"relaunch": false` in
 `setup` brings a running app to the front as before.
+
+## Host steps and variables (Simulator)
+
+A flow can run a command on the Mac between screen steps: another phone's server calls (a second
+user joining the room this phone hosts), the Mac's Wi-Fi off for an offline state. Its JSON
+output fills `${name}` in later steps.
+
+```json
+{"version": 1, "name": "room-join", "cwd": "../tools", "vars": {"guest": "Sam"},
+ "actions": [
+  {"type": "wait", "label_matches": "^[A-Z0-9]{6}$", "save": {"var": "code"}},
+  {"type": "host", "run": ["python3", "peer.py", "join", "${code}", "--name", "${guest}"],
+   "save": {"member": "member.id"}, "timeout": 30, "undo": ["python3", "peer.py", "leave", "${code}", "${member}"]},
+  {"type": "wait", "label": "1 request"},
+  {"type": "undo", "run": ["python3", "peer.py", "close", "${code}"]}
+ ]}
+```
+
+- `host`: `run` is an argv list (no shell), started in the flow's `cwd` (relative to the flow
+  file; default the flow's folder) with the Mac's environment. A non-zero exit, a timeout
+  (`timeout`, default 30 s) or a missing `save` field fails the step with its reason. `save`
+  maps a variable to a dotted path in the command's JSON stdout (`data.members.0.id`; a value
+  that is not a string is kept as JSON). The run's `metrics.json` keeps each host step's first
+  500 characters of stdout and the names it saved.
+- `vars` sets starting values. Built-ins: `${udid}`, `${bundle_id}`, `${flow_dir}` (the resolved
+  `cwd`). An unknown `${name}` fails its step before it runs; a value is filled in once (a value
+  holding `${…}` stays as it is).
+- `wait` with `"save": {"var": "code"}` keeps the label (or, with no label, the value) of the
+  first match, top-left first: read a code the app shows, then pass it to a host step.
+- `undo` on a host step is filled in after that step saved (a name it uses that neither the
+  variables nor the step's `save` give fails the step before its command runs), and runs when the flow ends (PASS,
+  FAIL or Ctrl-C), last declared first, before the app is terminated. A failing undo prints
+  `WARN undo …` and does not fail the run. Each declared undo is written to the simulator's
+  journal, so a run killed with SIGKILL has it run by the next run's repair
+  (`repaired …, undo`), or by the next `fastSimulatorTest do` on that simulator. An `undo` action runs its command now; its failure fails the step.
+- `fastSimulatorTest do` runs host steps too and takes `--vars '<json object>'`; its line ends
+  with ` vars={…}` (pass it to the next request's `--vars`) and ` undo_pending=[[…]]`: a `do`
+  runs no undo, so send each one later as `{"type":"undo","run":[…]}`.
+- Never call `fastSimulatorTest do` (or another flow) from a host step: the flow holds the
+  simulator and the request gets `BUSY`.
+- Simulator only: `fastDeviceTest` refuses a flow or request with `host`, `undo` or `save`
+  (`step N: host steps run on the simulator only (fastSimulatorTest)`), since an iPhone run is
+  one XCUITest request with no Mac step in the middle; also one with a `${…}` (its runner would
+  type the name) or a `label_matches` (its runner ignores the key, so the wait would pass at once).
 
 ## SwiftLint and build failures
 

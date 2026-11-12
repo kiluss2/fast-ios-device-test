@@ -566,6 +566,12 @@ class SimulatorTrailTests(unittest.TestCase):
         sleep = mock.patch.object(fast_ui.time, "sleep")
         sleep.start()
         self.addCleanup(sleep.stop)
+        # Its own lock folder: a journal another test left dirty would be repaired by `do` (more simctl calls).
+        locks = tempfile.TemporaryDirectory()
+        self.addCleanup(locks.cleanup)
+        folder = mock.patch.object(fast_ui, "LOCK_DIR", Path(locks.name))
+        folder.start()
+        self.addCleanup(folder.stop)
 
     def run_actions(self, fake: FakeAxe, *actions: dict, prompts: list | None = None) -> list[dict]:
         with mock.patch.object(fast_ui, "axe", side_effect=fake):
@@ -2337,6 +2343,263 @@ FlowRunner.swift:403: Expected failure in -[FastDeviceUITests.FlowRunner testSer
         self.assertNotIn("xcodegen", calls)
         self.assertEqual(calls, ["xcodebuild"])
         self.assertNotEqual(before, after)
+
+
+
+import fast_vars  # noqa: E402
+import fast_guard  # noqa: E402
+
+
+class VarsTests(unittest.TestCase):
+    """`${name}` in a flow: one pass over every string, a clear error for a name nobody set."""
+
+    def test_substitute_replaces_every_string_once(self) -> None:
+        self.assertEqual(fast_vars.substitute({"run": ["a", "${x}/b"], "n": {"t": "${x}"}, "k": 3}, {"x": "1"}, "step 2"),
+                         {"run": ["a", "1/b"], "n": {"t": "1"}, "k": 3})
+
+    def test_a_saved_value_is_not_expanded_again(self) -> None:
+        self.assertEqual(fast_vars.substitute("${m}", {"m": "${x}"}, "s"), "${x}")
+
+    def test_unknown_variable_names_the_step(self) -> None:
+        with self.assertRaises(fast_vars.VarError) as caught:
+            fast_vars.substitute({"text": "${code}"}, {}, "step 3")
+        self.assertIn("step 3: unknown variable ${code}", str(caught.exception))
+
+    def test_json_path_walks_dicts_and_lists(self) -> None:
+        self.assertEqual(fast_vars.json_path({"data": {"members": [{"id": "7"}]}}, "data.members.0.id"), "7")
+        with self.assertRaises(KeyError):
+            fast_vars.json_path({"data": {}}, "data.x")
+
+
+class FakeHost:
+    """subprocess.run for host steps: answers by the command's first two words, records every call."""
+
+    def __init__(self, answers: dict | None = None) -> None:
+        self.answers = answers or {}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        self.calls.append(list(argv))
+        self.kwargs = kwargs
+        answer = self.answers.get(tuple(argv[:2])) or self.answers.get(argv[0]) or (0, "{}", "")
+        if isinstance(answer, BaseException):
+            raise answer
+        code, out, err = answer
+        return subprocess.CompletedProcess(argv, code, out, err)
+
+
+class HostStepTests(unittest.TestCase):
+    """A flow's `host` step runs a Mac command, keeps fields of its JSON, and undoes itself at the end."""
+
+    TREE = json.dumps([{"type": "Application", "AXLabel": "Demo", "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+                        "children": [{"type": "Button", "AXLabel": "Go", "frame": {"x": 10, "y": 100, "width": 80, "height": 40}}]}])
+
+    def setUp(self) -> None:
+        locks = tempfile.TemporaryDirectory()
+        self.addCleanup(locks.cleanup)
+        patcher = mock.patch.object(fast_ui, "LOCK_DIR", Path(locks.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_main(self, actions: list, host: FakeHost, axe: object = None, **flow: object) -> tuple[int, FakeAxe, str, str, Path]:
+        raw = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, raw)
+        path = Path(raw) / "home.json"
+        path.write_text(json.dumps({"version": 1, "name": "home", "actions": actions, "setup": {"fresh_install": False},
+                                    "app": {"bundle_id": "com.example.app", "prebuilt": True, "simulator": "SIM",
+                                            "project_root": raw}, **flow}))
+        fake = axe or FakeAxe(self.TREE)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(path), "--json"]), \
+                mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
+                mock.patch.object(fast_ui, "command", side_effect=lambda args, **_: subprocess.CompletedProcess(args, 0, "", "")), \
+                mock.patch.object(fast_ui, "record"), mock.patch.object(fast_ui, "screenshot"), \
+                mock.patch.object(fast_ui, "axe", side_effect=fake), mock.patch.object(fast_vars, "spawn", side_effect=host), \
+                mock.patch.object(fast_ui.time, "sleep"), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = fast_ui.main()
+        return code, fake, out.getvalue(), err.getvalue(), Path(raw)
+
+    def test_host_saves_fields_and_undo_sees_them(self) -> None:
+        host = FakeHost({("car", "host"): (0, '{"code": "K7M9A3"}', ""), ("car", "pin"): (0, '{"id": "p1"}', "")})
+        code, fake, out, err, _ = self.run_main([
+            {"type": "host", "run": ["car", "host"], "save": {"code": "code"}, "undo": ["car", "end", "${code}"]},
+            {"type": "type_text", "text": "${code}"},
+            {"type": "host", "run": ["car", "pin", "${code}"], "save": {"pin": "id"}, "undo": ["car", "unpin", "${pin}"]},
+        ], host)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(("type", "K7M9A3"), fake.calls)
+        self.assertEqual(host.calls, [["car", "host"], ["car", "pin", "K7M9A3"], ["car", "unpin", "p1"], ["car", "end", "K7M9A3"]])
+        payload = json.loads(out[out.index("{"):])
+        hosts = [result for result in payload["results"] if result.get("host")]
+        self.assertEqual(hosts[0]["saved"], ["code"])
+        self.assertLessEqual(len(hosts[0]["stdout"]), fast_vars.HOST_LOG_LIMIT)
+
+    def test_host_cwd_is_the_flow_folder_or_its_cwd_key(self) -> None:
+        host = FakeHost()
+        _, _, _, _, raw = self.run_main([{"type": "host", "run": ["pwd"]}], host)
+        self.assertEqual(Path(host.kwargs["cwd"]).resolve(), raw.resolve())
+        host = FakeHost()
+        elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, elsewhere)
+        self.run_main([{"type": "host", "run": ["pwd"]}], host, cwd=elsewhere)
+        self.assertEqual(Path(host.kwargs["cwd"]).resolve(), Path(elsewhere).resolve())
+
+    def test_host_failures_say_why(self) -> None:
+        cases = [((2, "", "boom"), "exited 2: boom"),
+                 (subprocess.TimeoutExpired(["car"], 30), "timed out after 30 s"),
+                 ((0, "ok", ""), "printed no JSON"),
+                 ((0, '{"x": 1}', ""), "no 'code'")]
+        for answer, text in cases:
+            with self.subTest(text=text):
+                code, _, out, err, _ = self.run_main([{"type": "host", "run": ["car", "host"], "save": {"code": "code"}}],
+                                                     FakeHost({("car", "host"): answer}))
+                self.assertEqual(code, 1)
+                self.assertIn(text, out + err)
+
+    def test_undo_runs_on_fail_and_its_error_only_warns(self) -> None:
+        host = FakeHost({("car", "end"): (1, "", "gone")})
+        code, _, out, err, _ = self.run_main([
+            {"type": "host", "run": ["car", "host"], "undo": ["car", "end"]},
+            {"type": "wait", "label": "Never", "timeout": 0.01}], host)
+        self.assertEqual(code, 1)
+        self.assertIn(["car", "end"], host.calls)
+        self.assertIn("WARN undo car", err)
+
+    def test_killed_run_runs_its_pending_undo(self) -> None:
+        host = FakeHost()
+        with mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "stop_stale_recorder"), \
+                mock.patch.object(fast_vars, "spawn", side_effect=host), contextlib.redirect_stderr(io.StringIO()):
+            killed = fast_ui.SimulatorLease("SIM", Path("a.json"))
+            killed.acquire(0)
+            killed.touch("undo", [{"run": ["networksetup", "-setairportpower", "en1", "on"], "cwd": "/tmp"}])
+            killed.release(clean=False)
+            following = fast_ui.SimulatorLease("SIM", Path("b.json"))
+            following.acquire(0)
+            following.release(clean=True)
+        self.assertEqual(host.calls, [["networksetup", "-setairportpower", "en1", "on"]])
+        self.assertIn("undo", following.repaired)
+
+    def test_an_unknown_name_in_undo_stops_the_step_before_its_command_runs(self) -> None:
+        host = FakeHost()
+        flow_vars = fast_vars.FlowVars({}, Path("/tmp"))
+        step = {"type": "host", "run": ["networksetup", "-setairportpower", "en1", "off"], "save": {"code": "code"},
+                "undo": ["networksetup", "-setairportpower", "${iface}", "on"]}
+        with mock.patch.object(fast_vars, "spawn", side_effect=host), self.assertRaises(fast_vars.VarError) as caught:
+            flow_vars.step(flow_vars.expand(step, 2), 2)
+        self.assertEqual([], host.calls, "the Wi-Fi must not go off with no way back")
+        self.assertIn("step 2 undo: unknown variable ${iface}", str(caught.exception))
+        ok = {**step, "undo": ["end", "${code}"]}
+        with mock.patch.object(fast_vars, "spawn", side_effect=FakeHost({("networksetup", "-setairportpower"): (0, '{"code": "K"}', "")})):
+            flow_vars.step(flow_vars.expand(ok, 3), 3)
+        self.assertEqual([["end", "K"]], flow_vars.pending(), "a name the step saves is known")
+
+    def test_a_do_after_a_killed_run_repairs_first(self) -> None:
+        host = FakeHost()
+        with mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "stop_stale_recorder"), \
+                mock.patch.object(fast_vars, "spawn", side_effect=host), contextlib.redirect_stderr(io.StringIO()) as err:
+            killed = fast_ui.SimulatorLease("SIM-DO", Path("a.json"))
+            killed.acquire(0)
+            killed.touch("undo", [{"run": ["networksetup", "-setairportpower", "en1", "on"], "cwd": "/tmp"}])
+            killed.release(clean=False)
+            fast_ui.ensure_not_busy("SIM-DO")
+            fast_ui.ensure_not_busy("SIM-DO")
+        self.assertEqual([["networksetup", "-setairportpower", "en1", "on"]], host.calls, "once, then the journal is clean")
+        self.assertIn("repaired undo", err.getvalue())
+
+    def test_wait_save_takes_the_first_match_top_left(self) -> None:
+        tree = json.dumps([{"type": "Application", "AXLabel": "Demo", "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+                            "children": [
+                                {"type": "StaticText", "AXLabel": "AB12CD", "frame": {"x": 10, "y": 300, "width": 80, "height": 20}},
+                                {"type": "StaticText", "AXLabel": "ZZ99ZZ", "frame": {"x": 10, "y": 100, "width": 80, "height": 20}},
+                                {"type": "TextField", "AXLabel": "", "AXValue": "Q1W2E3",
+                                 "frame": {"x": 10, "y": 500, "width": 80, "height": 20}}]}])
+        code, fake, out, err, _ = self.run_main([
+            {"type": "wait", "label_matches": "^[A-Z0-9]{6}$", "save": {"var": "code"}},
+            {"type": "type_text", "text": "${code}"},
+            {"type": "wait", "element_type": "TextField", "save": {"var": "field"}},
+            {"type": "type_text", "text": "${field}"}], FakeHost(), axe=FakeAxe(tree))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(("type", "ZZ99ZZ"), fake.calls)
+        self.assertIn(("type", "Q1W2E3"), fake.calls)
+
+    def test_builtins_are_set(self) -> None:
+        host = FakeHost()
+        _, _, _, _, raw = self.run_main([{"type": "host", "run": ["echo", "${udid}", "${bundle_id}", "${flow_dir}", "${helpers}"]}],
+                                        host, vars={"helpers": "/h"})
+        self.assertEqual(host.calls[0][1:4], ["SIM", "com.example.app", str(raw.resolve())])
+        self.assertEqual(host.calls[0][4], "/h")
+
+    def test_check_actions_refuses_bad_host_shapes(self) -> None:
+        bad = [{"type": "host"}, {"type": "host", "run": "car host"}, {"type": "host", "run": ["car", 3]},
+               {"type": "host", "run": ["car"], "save": {"code": 1}}, {"type": "host", "run": ["car"], "undo": "car end"},
+               {"type": "host", "run": ["car"], "timeout": -1}, {"type": "undo"}, {"type": "wait", "label": "A", "save": {"x": "y"}}]
+        for action in bad:
+            with self.subTest(action=action), self.assertRaises(ValueError) as caught:
+                fast_guard.check_actions([{"type": "wait", "label": "A"}, action])
+            self.assertIn("step 2", str(caught.exception))
+        fast_guard.check_actions([{"type": "host", "run": ["car"], "save": {"c": "code"}, "undo": ["car", "end"], "timeout": 10},
+                                  {"type": "undo", "run": ["car", "end"]}, {"type": "wait", "label": "A", "save": {"var": "x"}}])
+
+
+class LabelMatchesTests(unittest.TestCase):
+    def test_a_bad_pattern_is_refused_before_the_run(self) -> None:
+        for action in ({"type": "wait", "label_matches": "("},
+                       {"type": "tap_label", "label": "Go", "expect": {"label_matches": "[a-"}}):
+            with self.subTest(action=action):
+                with self.assertRaises(ValueError) as caught:
+                    fast_guard.check_actions([{"type": "launch"}, action])
+                self.assertIn("step 2: label_matches", str(caught.exception))
+
+
+class DoVarsTests(unittest.TestCase):
+    """In `do` a host step runs, its undo waits for the agent, and `--vars` carries values to the next request."""
+
+    def sim_do(self, *argv: str, host: FakeHost) -> tuple[int, str, FakeAxe]:
+        out = io.StringIO()
+        fake = FakeAxe(sim_tree("Demo", button("Go")))
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(fast_ui, "ensure_booted"), \
+                mock.patch.object(fast_ui, "ensure_device_hub"), mock.patch.object(fast_ui, "command"), \
+                mock.patch.object(fast_ui, "axe", side_effect=fake), mock.patch.object(fast_ui, "record"), \
+                mock.patch.object(fast_vars, "spawn", side_effect=host), mock.patch.object(fast_ui.time, "sleep"), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = fast_ui.run_do([*argv, "--simulator", "SIM", "--out", raw])
+        return code, out.getvalue(), fake
+
+    def test_do_prints_vars_and_pending_undo_and_takes_vars(self) -> None:
+        host = FakeHost({("x", "make"): (0, '{"code": "K"}', "")})
+        code, out, _ = self.sim_do('[{"type":"host","run":["x","make"],"save":{"c":"code"},"undo":["end","${c}"]}]', host=host)
+        self.assertEqual(code, 0, out)
+        self.assertIn('vars={"c":"K"}', out)
+        self.assertIn('undo_pending=[["end","K"]]', out)
+        self.assertEqual(host.calls, [["x", "make"]])
+        code, out, fake = self.sim_do('{"type":"type_text","text":"${c}"}', "--vars", '{"c":"K"}', host=FakeHost())
+        self.assertEqual(code, 0, out)
+        self.assertIn(("type", "K"), fake.calls)
+
+    def test_an_undo_step_runs_now(self) -> None:
+        host = FakeHost({("end", "K"): (1, "", "no such room")})
+        code, out, _ = self.sim_do('{"type":"undo","run":["end","K"]}', host=host)
+        self.assertEqual(code, 1)
+        self.assertIn("exited 1: no such room", out)
+
+    def test_device_refuses_host_steps(self) -> None:
+        import fast_device
+        for action in ({"type": "host", "run": ["x"]}, {"type": "undo", "run": ["x"]},
+                       {"type": "wait", "label": "A", "save": {"var": "x"}}):
+            with self.subTest(action=action):
+                with self.assertRaises(fast_device.FastDeviceError) as caught:
+                    fast_device.prepare_flow({"actions": [action]})
+                self.assertIn("host steps run on the simulator only", str(caught.exception))
+        # A device run does no substitution and ignores label_matches: it would type "${code}" or pass a wait at once.
+        for action, words in (({"type": "type_text", "text": "${code}"}, "${…} variables"),
+                              ({"type": "wait", "label_matches": "^[A-Z]{6}$"}, "label_matches"),
+                              ({"type": "tap_label", "label": "Go", "expect": {"label_matches": "Done"}}, "label_matches")):
+            with self.subTest(action=action):
+                with self.assertRaises(fast_device.FastDeviceError) as caught:
+                    fast_device.prepare_flow({"actions": [action]})
+                self.assertIn(f"step 1: {words}", str(caught.exception))
+                self.assertIn("simulator only", str(caught.exception))
+        fast_device.prepare_flow({"vars": {"a": "b"}, "actions": [{"type": "tap_label", "label": "Go"}]})
 
 
 if __name__ == "__main__":

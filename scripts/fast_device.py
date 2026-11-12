@@ -430,6 +430,10 @@ def report_notes(report: dict[str, Any]) -> str:
 
 
 def prepare_flow(spec: dict[str, Any], appearance: str | None = None, content_size: str | None = None) -> dict[str, Any]:
+    try:
+        fast_guard.refuse_host(spec.get("actions") or [])
+    except ValueError as error:
+        raise FastDeviceError(str(error)) from None
     setup = dict(spec.get("setup", {}))
     if "optional_permission_labels" in setup:
         prompt_entries(setup["optional_permission_labels"])
@@ -926,6 +930,7 @@ def run_command(argv: list[str]) -> int:
             parsed_actions = json.loads(args.action)
             parsed_actions = parsed_actions if isinstance(parsed_actions, list) else [parsed_actions]
             fast_guard.check_actions(parsed_actions)
+            fast_guard.refuse_host(parsed_actions)
         except ValueError as error:
             raise FastDeviceError(str(error)) from error
         risky = fast_guard.risky_step(parsed_actions)
