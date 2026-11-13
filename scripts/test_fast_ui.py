@@ -2787,5 +2787,118 @@ class DeviceBuildTests(unittest.TestCase):
         self.assertIn("no such module", (self.dd / ".fastdevice-build.log").read_text())
 
 
+
+class CacheCleanupTests(unittest.TestCase):
+    """What the tool keeps outside a project: old iPhone runner builds and `do` shots in the default
+    folder go on their own, never a runner in use and never a folder given with --out."""
+
+    def setUp(self) -> None:
+        import fast_device
+        self.fast_device = fast_device
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root)
+
+    def aged(self, path: Path, days: float, folder: bool = True) -> Path:
+        if folder:
+            path.mkdir(parents=True)
+            (path / "signed").write_text("x")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        stamp = time.time() - days * 86400
+        for item in [path, *path.rglob("*")] if folder else [path]:
+            os.utime(item, (stamp, stamp))
+        return path
+
+    def prune(self, keep: str, holders: str = "", env: dict | None = None) -> list[str]:
+        calls: list[list[str]] = []
+
+        def pgrep(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            calls.append(args)
+            hit = args[-1].endswith(holders) if holders else False
+            return subprocess.CompletedProcess(args, 0 if hit else 1, stdout="4242\n" if hit else "", stderr="")
+
+        env = {"FAST_DEVICE_RUNNER_KEEP_DAYS": "14", **(env or {})}
+        with mock.patch.object(self.fast_device, "CACHE_ROOT", self.root), \
+                mock.patch.object(self.fast_device, "run", side_effect=pgrep), \
+                mock.patch.dict(os.environ, env):
+            self.fast_device.prune_runners(keep)
+        return sorted(item.name for item in self.root.iterdir())
+
+    def test_runners_unused_for_14_days_go_but_the_one_in_use_now_stays(self) -> None:
+        self.aged(self.root / "aaaaaaaaaaaaaaaa", 20)
+        self.aged(self.root / "bbbbbbbbbbbbbbbb", 5)
+        self.aged(self.root / "cccccccccccccccc", 30)  # the key this run uses
+        self.aged(self.root / "server-U.log", 40, folder=False)
+        self.aged(self.root / "notes", 40)
+        self.assertEqual(["bbbbbbbbbbbbbbbb", "cccccccccccccccc", "notes", "server-U.log"], self.prune("cccccccccccccccc"))
+
+    def test_a_runner_built_long_ago_but_served_lately_stays(self) -> None:
+        # Builds before 1.16.0 have no last-used file; every run rewrites its serve-/run- copy.
+        products = self.root / "aaaaaaaaaaaaaaaa/dd/Build/Products"
+        products.mkdir(parents=True)
+        (products.parents[2] / "signed").write_text("x")
+        self.aged(products / "serve-U.xctestrun", 1, folder=False)
+        stamp = time.time() - 20 * 86400
+        for item in (products, products.parent, products.parents[1], products.parents[2], products.parents[2] / "signed"):
+            os.utime(item, (stamp, stamp))
+        self.assertEqual(["aaaaaaaaaaaaaaaa"], self.prune("cccccccccccccccc"))
+
+    def test_a_runner_some_process_still_runs_from_stays(self) -> None:
+        self.aged(self.root / "aaaaaaaaaaaaaaaa", 20)
+        self.assertEqual(["aaaaaaaaaaaaaaaa"], self.prune("cccccccccccccccc", holders="aaaaaaaaaaaaaaaa"))
+
+    def test_keep_days_0_keeps_every_runner(self) -> None:
+        self.aged(self.root / "aaaaaaaaaaaaaaaa", 200)
+        self.assertEqual(["aaaaaaaaaaaaaaaa"], self.prune("c", env={"FAST_DEVICE_RUNNER_KEEP_DAYS": "0"}))
+
+    def test_using_a_runner_marks_it_used_and_tidies_the_others(self) -> None:
+        current = self.aged(self.root / "cccccccccccccccc", 30)
+        products = current / "dd/Build/Products"
+        products.mkdir(parents=True)
+        (products / "FastDevice.xctestrun").write_text("x")
+        self.aged(self.root / "aaaaaaaaaaaaaaaa", 20)
+        with mock.patch.object(self.fast_device, "CACHE_ROOT", self.root), \
+                mock.patch.object(self.fast_device, "runner_fingerprint", return_value="cccccccccccccccc"), \
+                mock.patch.dict(os.environ, {"FAST_DEVICE_RUNNER_KEEP_DAYS": "14"}), \
+                mock.patch.object(self.fast_device, "run",
+                                  return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="")):
+            self.fast_device.build_runner("/Xcode", {}, rebuild=False)
+        self.assertEqual(["cccccccccccccccc"], sorted(item.name for item in self.root.iterdir()))
+        self.assertLess(time.time() - (current / "last-used").stat().st_mtime, 60)
+
+    def test_the_default_do_folder_drops_shots_older_than_the_keep_days(self) -> None:
+        import fast_media
+        old = self.aged(self.root / "do/old.png", 4, folder=False)
+        new = self.aged(self.root / "do/new.png", 1, folder=False)
+        mine = self.aged(self.root / "mine/old.png", 4, folder=False)
+        with mock.patch.dict(os.environ, {"FAST_UI_KEEP_DAYS": "3"}):
+            fast_media.ready_do_folder(self.root / "mine", self.root / "do")
+            self.assertTrue(mine.exists(), "a folder given with --out is never tidied")
+            fast_media.ready_do_folder(self.root / "do", self.root / "do")
+        self.assertEqual((False, True), (old.exists(), new.exists()))
+
+    def test_both_do_commands_get_their_folder_ready_that_way(self) -> None:
+        import fast_media
+        reply = {"status": "pass", "results": [], "labels": []}
+        with mock.patch.object(self.fast_device, "DO_OUT", self.root / "iphone"), \
+                mock.patch.object(self.fast_device, "resolve_device", return_value={"udid": "U", "name": "X"}), \
+                mock.patch.object(self.fast_device, "start_server"), \
+                mock.patch.object(self.fast_device, "request", return_value=dict(reply)), \
+                mock.patch.object(self.fast_device, "ready_do_folder", wraps=fast_media.ready_do_folder) as ready, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.fast_device.run_command(["do", '{"type":"wait","label":"A"}'])
+        ready.assert_called_once_with(self.root / "iphone", self.root / "iphone")
+        with mock.patch.object(fast_ui, "DO_OUT", self.root / "sim"), \
+                mock.patch.object(fast_ui, "ensure_booted"), mock.patch.object(fast_ui, "ensure_device_hub"), \
+                mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "record"), \
+                mock.patch.object(fast_ui, "axe", side_effect=FakeAxe(SimulatorTrailTests.A)), \
+                mock.patch.object(fast_ui.time, "sleep"), \
+                mock.patch.object(fast_ui, "ready_do_folder", wraps=fast_media.ready_do_folder) as ready, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            fast_ui.run_do(['{"type":"wait","label":"Go"}', "--simulator", "SIM"])
+        ready.assert_called_once_with(self.root / "sim", self.root / "sim")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -440,7 +440,9 @@ fastDeviceTest build --project /abs/MyApp/MyApp.xcodeproj --scheme MyApp-DEV \
 
 - The runner (`device-runner/`, its `.xcodeproj` committed; regenerate with `xcodegen
   generate` after editing `project.yml`) is cached per Xcode + signing profile + runner
-  source in `~/Library/Caches/fast-device-test`; `--rebuild-runner` forces a rebuild.
+  source in `~/Library/Caches/fast-device-test`; `--rebuild-runner` forces a rebuild. A build
+  unused for 14 days is deleted (`FAST_DEVICE_RUNNER_KEEP_DAYS`), so a phone idle that long
+  waits 1–2 min for its runner once.
 - `--device` takes a UDID, the full name, or a unique part of the name.
 - `do` skips XCUITest's wait-for-idle by default (`--idle-wait` keeps it); a flow skips it with
   `setup.wait_for_idle: false`. The runner then waits for the layout itself; the report shows
@@ -665,7 +667,10 @@ fastUIMap clear com.apple.Preferences        # or: fastUIMap clear --all
 - `FAST_UI_SESSION`: default `--session` for both engines.
 - `FAST_VIDEO_LONG_SIDE` / `FAST_VIDEO_KBPS`: review-quality re-encode of recordings
   (960 / 800); `FAST_VIDEO_LONG_SIDE=0` keeps the original clip.
-- `FAST_UI_KEEP_DAYS`: prune age for that root; `0` disables pruning.
+- `FAST_UI_KEEP_DAYS`: prune age (3 days) for that root and for the default `do` folder
+  `~/Library/Caches/fast-ui/do` (a folder given with `--out` is never pruned); `0` disables pruning.
+- `FAST_DEVICE_RUNNER_KEEP_DAYS`: an iPhone runner build unused this long (14 days) is deleted
+  when a runner starts; never the one starting nor one a process runs from; `0` keeps them all.
 - `FAST_DEVICE_ROOT`: artifacts root for `fastDeviceTest`.
 - `FAST_EVIDENCE`: `0` files no evidence. `FAST_EVIDENCE_DIR`: where evidence folders go
   (`~/Desktop`). `FAST_EVIDENCE_TICKET` / `FAST_EVIDENCE_PROJECT`: name the folder when the

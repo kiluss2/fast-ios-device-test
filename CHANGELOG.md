@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.17.0 — 2026-11-13
+
+- iPhone: runner builds unused for 14 days are deleted when a runner starts
+  (`FAST_DEVICE_RUNNER_KEEP_DAYS`, `0` keeps them). One is built per Xcode × signing profile ×
+  runner source (85–140 MB) and none is used again once one of those changes: 15 of them held
+  1.4 GB on one Mac. The one starting and any a process still runs from are never deleted; for a
+  build made before this release, its last serve/run xctestrun copy tells when it was last used.
+- Both engines: the default `do` folder (`~/Library/Caches/fast-ui/do`) drops shots and dumps
+  untouched for `FAST_UI_KEEP_DAYS` (3) before each request; a folder given with `--out` is kept.
+
 ## 1.16.0 — 2026-11-13
 
 - iPhone: `fastDeviceTest build --project <P> --scheme <S> [--configuration <C>] [--bundle-id <id>]

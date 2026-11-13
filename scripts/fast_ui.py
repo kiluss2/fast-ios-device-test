@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterator
 
 # bin/ holds symlinks in a git checkout but copies in the zip, so look beside scripts/ too.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent.parent / "scripts")]
-from fast_media import prune_artifacts, publish_video, shrink_video  # noqa: E402
+from fast_media import prune_artifacts, publish_video, ready_do_folder, shrink_video  # noqa: E402
 import fast_evidence  # noqa: E402
 from fast_guard import check_actions, parse_prompt_labels, risky_step  # noqa: E402
 import fast_vars  # noqa: E402
@@ -2337,7 +2337,7 @@ def run_do(argv: list[str]) -> int:
     except FastUIError as error:
         print(f"FAIL error={error}", file=sys.stderr)
         return 1
-    args.out.mkdir(parents=True, exist_ok=True)
+    ready_do_folder(args.out, DO_OUT)
     TRAIL = new_trail(args.app) if args.app else None
     results: list[dict[str, Any]] = []
     failed: tuple[int, dict[str, Any], Exception] | None = None

@@ -24,7 +24,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 # bin/ holds symlinks in a git checkout but copies in the zip, so look beside scripts/ too.
 sys.path[:0] = [str(HERE), str(HERE.parent / "scripts")]
-from fast_media import VIDEO_SUFFIXES, prune_artifacts, publish_video, shrink_video  # noqa: E402
+from fast_media import VIDEO_SUFFIXES, prune_artifacts, publish_video, ready_do_folder, shrink_video  # noqa: E402
 import fast_evidence  # noqa: E402
 import fast_guard  # noqa: E402
 from fast_ui_map import record  # noqa: E402
@@ -307,14 +307,51 @@ def base_xctestrun(products: Path) -> Path:
     return next(p for p in sorted(products.glob("*.xctestrun")) if not p.name.startswith(("run-", "serve-")))
 
 
+RUNNER_KEY = re.compile(r"[0-9a-f]{16}")
+
+
+def prune_runners(keep: str) -> None:
+    """Delete runner builds unused for FAST_DEVICE_RUNNER_KEEP_DAYS (14; 0 keeps them all). There is
+    one per Xcode × signing profile × runner source, 85–140 MB each, and none is used again once one
+    of those changes. Never `keep` (this run's), nor one a process still runs from."""
+    days = float(os.environ.get("FAST_DEVICE_RUNNER_KEEP_DAYS", "14"))
+    if days <= 0 or not CACHE_ROOT.is_dir():
+        return
+    cutoff = time.time() - days * 86400
+    for folder in CACHE_ROOT.iterdir():
+        if folder.name.startswith(".pruning-") and folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)  # a prune that was cut short
+            continue
+        if folder.name == keep or not RUNNER_KEY.fullmatch(folder.name) or not folder.is_dir():
+            continue
+        # Every run rewrites its serve-/run- xctestrun copy: the last use of a build made before
+        # last-used existed.
+        marks = [folder, folder / "signed", folder / "last-used", *(folder / "dd/Build/Products").glob("*.xctestrun")]
+        try:
+            used = max(path.stat().st_mtime for path in marks if path.exists())
+        except (OSError, ValueError):
+            continue
+        if used >= cutoff or run(["pgrep", "-f", str(folder)], check=False).returncode == 0:
+            continue
+        # Renamed first, so a run that starts now finds no half-deleted runner.
+        doomed = CACHE_ROOT / f".pruning-{folder.name}-{os.getpid()}"
+        try:
+            folder.rename(doomed)
+        except OSError:
+            continue
+        shutil.rmtree(doomed, ignore_errors=True)
+
+
 def build_runner(developer_dir: str, signing: dict[str, Any], rebuild: bool) -> Path:
     key = runner_fingerprint(developer_dir, signing)
     work = CACHE_ROOT / key
     products = work / "dd/Build/Products"
     marker = work / "signed"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "last-used").touch()
+    prune_runners(key)
     if marker.exists() and not rebuild:
         return base_xctestrun(products)
-    work.mkdir(parents=True, exist_ok=True)
     # The generated project ships with the tool, so xcodegen is only needed when
     # someone edits project.yml and deletes the .xcodeproj to regenerate it.
     generated = RUNNER_SOURCE / "FastDeviceRunner.xcodeproj"
@@ -1050,7 +1087,7 @@ def run_command(argv: list[str]) -> int:
             response = request(udid, {"op": "action", "action": actions[0], **extra}, timeout=timeout)
             results = [response["result"]] if response.get("result") else []
         save_trail(response)
-        args.out.mkdir(parents=True, exist_ok=True)
+        ready_do_folder(args.out, DO_OUT)
         shots = save_screenshots(response, args.out)
         dumps = save_dumps(results, args.out)
         status = "PASS" if response.get("status") == "pass" else "FAIL"

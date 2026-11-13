@@ -162,26 +162,44 @@ def publish_video(task_dir: Path, video: Path, passed: bool, session: str = "") 
     return final
 
 
+def prune_entries(folder: Path, keep_days: float) -> int:
+    """Delete what sits directly in `folder` untouched for `keep_days`; 0 keeps everything."""
+    if keep_days <= 0 or not folder.is_dir():
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    removed = 0
+    for entry in folder.iterdir():
+        try:
+            if entry.stat().st_mtime >= cutoff:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def prune_artifacts(root: Path, keep_days: float) -> int:
     """Delete run folders and final videos untouched for `keep_days`; empty task dirs go too."""
     if keep_days <= 0 or not root.is_dir():
         return 0
-    cutoff = time.time() - keep_days * 86400
     removed = 0
     for task_dir in root.iterdir():
         if not task_dir.is_dir():
             continue
-        for entry in task_dir.iterdir():
-            try:
-                if entry.stat().st_mtime >= cutoff:
-                    continue
-                if entry.is_dir():
-                    shutil.rmtree(entry)
-                else:
-                    entry.unlink()
-                removed += 1
-            except OSError:
-                continue
+        removed += prune_entries(task_dir, keep_days)
         if not any(task_dir.iterdir()):
             task_dir.rmdir()
     return removed
+
+
+def ready_do_folder(out: Path, default: Path) -> Path:
+    """`out` created for a `do` request. In the default folder, shots and dumps untouched for
+    FAST_UI_KEEP_DAYS (3) go first, as run folders do; a folder given with --out is the caller's."""
+    if out == default:
+        prune_entries(default, float(os.environ.get("FAST_UI_KEEP_DAYS", "3")))
+    out.mkdir(parents=True, exist_ok=True)
+    return out
