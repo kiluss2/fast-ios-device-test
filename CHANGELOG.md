@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.15.0 — 2026-11-13
+
+- Simulator: `tap_label` no longer reads the whole screen again before every tap (about 1 s each
+  since 1.13.0). A screen still for 1 s since the last action is tapped at once; otherwise one read
+  at the control's point (`axe describe-ui --point`, 0.40 s against 0.89 s for a whole read on an
+  iPhone 17 simulator) confirms it stopped moving, and only another element there sends it back to
+  the full re-read. A new `do` process never takes the screen for still. Measured per tap on an
+  iPhone 17 simulator (iOS 27.0, Settings): right after a wait 2.10–2.31 → 1.68–1.74 s, on a screen
+  still for 1.5 s 2.61–2.97 → 2.02–2.11 s.
+- iPhone: taps are sent straight to XCTest's event synthesizer (`XCPointerEventPath` +
+  `XCSynthesizedEventRecord`, looked up at runtime) instead of `XCUICoordinate.tap()`, which first
+  resolves the app over the USB link. Measured from tap to the next screen's label: Clock's Liquid
+  Glass tab bar 1.48 → 1.24 s (20/20 taps landed both ways) and Settings' glass back button
+  2.05 → 1.82 s on iOS 27.2.1; back 1.48 → 1.24 s and the status bar 1.09 → 0.79 s on iOS 18.5. A
+  tap that pushes a screen gains nothing. `setup.touch: "xcuitest"` keeps XCUITest's tap; a sideways
+  iPhone or an Xcode without the private API uses it by itself.
+
 ## 1.14.1 — 2026-11-12
 
 - Simulator: `setup.location` ("lat,lon"), or `FAST_UI_LOCATION`, grants the app location and sets

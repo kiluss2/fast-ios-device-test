@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		254EC07B9D26D42EEF90B729 /* DirectTouch.m in Sources */ = {isa = PBXBuildFile; fileRef = 18917F90F8AC5426411A45DD /* DirectTouch.m */; };
 		366E46B3E2CB8C8258F6A078 /* FlowRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09D95C052FF1ACC9482850B4 /* FlowRunner.swift */; };
 		3E98FE0D56B6130E44239B75 /* Settle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9046CAECC30BA5BCF9304A30 /* Settle.swift */; };
 		3F6721CECFDA32A5D1D9EB94 /* PromptRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D237A099A0325E354484FEC /* PromptRules.swift */; };
@@ -21,10 +22,13 @@
 		09D95C052FF1ACC9482850B4 /* FlowRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowRunner.swift; sourceTree = "<group>"; };
 		0D237A099A0325E354484FEC /* PromptRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptRules.swift; sourceTree = "<group>"; };
 		12A0F7544D460CEB48C710A5 /* Trail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trail.swift; sourceTree = "<group>"; };
+		18917F90F8AC5426411A45DD /* DirectTouch.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DirectTouch.m; sourceTree = "<group>"; };
 		44D76808729E0532787CD5E5 /* RequestServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestServer.swift; sourceTree = "<group>"; };
 		9046CAECC30BA5BCF9304A30 /* Settle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settle.swift; sourceTree = "<group>"; };
+		CC84113BD999F7D6FECEC845 /* DirectTouch.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DirectTouch.h; sourceTree = "<group>"; };
 		D63E79C1198B8D08F6671256 /* Requests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Requests.swift; sourceTree = "<group>"; };
 		EA8ECD181464F151DF4C200B /* FastDeviceUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FastDeviceUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EAA1DA5D6BC0BF1317FD2F62 /* FastDeviceUITests-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "FastDeviceUITests-Bridging-Header.h"; sourceTree = "<group>"; };
 		F21D79583A6E45149420453D /* Quiescence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Quiescence.swift; sourceTree = "<group>"; };
 		F2C6C48F9FC1E7D07FCC76FC /* Gestures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Gestures.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -49,6 +53,9 @@
 		85E8D0BB77B2BE257952423A /* UITests */ = {
 			isa = PBXGroup;
 			children = (
+				CC84113BD999F7D6FECEC845 /* DirectTouch.h */,
+				18917F90F8AC5426411A45DD /* DirectTouch.m */,
+				EAA1DA5D6BC0BF1317FD2F62 /* FastDeviceUITests-Bridging-Header.h */,
 				09D95C052FF1ACC9482850B4 /* FlowRunner.swift */,
 				F2C6C48F9FC1E7D07FCC76FC /* Gestures.swift */,
 				0D237A099A0325E354484FEC /* PromptRules.swift */,
@@ -116,6 +123,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				254EC07B9D26D42EEF90B729 /* DirectTouch.m in Sources */,
 				366E46B3E2CB8C8258F6A078 /* FlowRunner.swift in Sources */,
 				A7E157FDCB076B8CFC21E10C /* Gestures.swift in Sources */,
 				3F6721CECFDA32A5D1D9EB94 /* PromptRules.swift in Sources */,
@@ -205,6 +213,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fast.device.runner;
 				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "UITests/FastDeviceUITests-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -277,6 +286,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fast.device.runner;
 				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "UITests/FastDeviceUITests-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;

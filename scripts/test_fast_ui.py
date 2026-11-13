@@ -145,6 +145,7 @@ class ActionTests(unittest.TestCase):
     def test_tap_label_taps_matched_frame_without_axe_label_lookup(self) -> None:
         node = {"AXLabel": "Yes", "type": "Button", "frame": {"x": 10, "y": 20, "width": 100, "height": 40}}
         with mock.patch.object(fast_ui, "hierarchy", return_value=[node]), \
+                mock.patch.object(fast_ui, "point_node", return_value=node), \
                 mock.patch.object(fast_ui, "tap_point") as tap, \
                 mock.patch.object(fast_ui, "axe") as axe:
             fast_ui.execute_action({"type": "tap_label", "label": "Yes"}, "SIM", Path("/tmp"), 1, [])
@@ -155,10 +156,14 @@ class ActionTests(unittest.TestCase):
         def at(y: float) -> list[dict[str, Any]]:
             return [{"AXLabel": "Nickname", "type": "Button", "frame": {"x": 200, "y": y, "width": 100, "height": 40}}]
         trees = [at(600), at(420), at(300), at(300)]
+        under = {"AXLabel": "Map", "type": "Other", "frame": {"x": 0, "y": 0, "width": 402, "height": 874}}
         with mock.patch.object(fast_ui, "hierarchy", side_effect=lambda *_a, **_k: trees.pop(0) if len(trees) > 1 else trees[0]), \
+                mock.patch.object(fast_ui, "point_node", return_value=under) as point, \
                 mock.patch.object(fast_ui, "tap_point") as tap, mock.patch.object(fast_ui.time, "sleep"):
             fast_ui.execute_action({"type": "tap_label", "label": "Nickname"}, "SIM", Path("/tmp"), 1, [])
+        point.assert_called_once_with("SIM", 250.0, 620.0)
         tap.assert_called_once_with("SIM", 250.0, 320.0, 0.15)
+
 
     def test_optional_tap_label_skips_when_missing(self) -> None:
         with mock.patch.object(fast_ui, "hierarchy", return_value=[]), \
@@ -302,7 +307,7 @@ class ActionTests(unittest.TestCase):
     def test_long_press_holds_the_resolved_node(self) -> None:
         node = {"AXLabel": "Weather", "type": "Other", "frame": {"x": 0, "y": 0, "width": 10, "height": 10}}
         with mock.patch.object(fast_ui, "hierarchy", return_value=[node]), mock.patch.object(fast_ui, "axe") as axe, \
-                mock.patch.object(fast_ui.time, "sleep"):
+                mock.patch.object(fast_ui, "point_node", return_value=node), mock.patch.object(fast_ui.time, "sleep"):
             result = fast_ui.execute_action({"type": "long_press", "label": "Weather"}, "SIM", Path("/tmp"), 1, [])
         axe.assert_called_once_with("SIM", "touch", "-x", "5.00", "-y", "5.00", "--down", "--up", "--delay", "1.0")
         self.assertEqual(result, {"fallback_type": "Other"})
@@ -319,7 +324,10 @@ class ActionTests(unittest.TestCase):
             fast_ui.execute_action({"type": "long_press", "x": 40}, "SIM", Path("/tmp"), 1, [])
 
     def run_gesture(self, action: dict, nodes: list | None = None) -> mock.Mock:
+        # The control is where it was read: the gesture is the only call left to AXe.
+        still = (nodes or [None])[0]
         with mock.patch.object(fast_ui, "hierarchy", return_value=nodes or []), \
+                mock.patch.object(fast_ui, "point_node", return_value=still), \
                 mock.patch.object(fast_ui, "axe") as axe, mock.patch.object(fast_ui, "command") as cmd, \
                 mock.patch.object(fast_ui.time, "sleep"):
             fast_ui.execute_action(action, "SIM", Path("/tmp"), 1, [])
@@ -542,16 +550,27 @@ def button(label: str, y: float = 300) -> dict:
 
 
 class FakeAxe:
-    """describe-ui serves the given trees in order (the last one repeats); gestures succeed."""
+    """describe-ui serves the given trees in order (the last one repeats); `describe-ui --point` answers
+    the smallest element at that point of the current tree without moving on; gestures succeed."""
 
     def __init__(self, *trees: str) -> None:
         self.trees = list(trees)
+        self.shown = self.trees[0] if self.trees else "[]"
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, udid: str, *args: str, check: bool = True) -> mock.Mock:
         self.calls.append(args)
+        if args[:2] == ("describe-ui", "--point"):
+            x, y = (float(v) for v in args[2].split(","))
+            inside = [n for n in fast_ui.flatten(json.loads(self.shown))
+                      if n["frame"]["x"] <= x <= n["frame"]["x"] + n["frame"]["width"]
+                      and n["frame"]["y"] <= y <= n["frame"]["y"] + n["frame"]["height"]]
+            smallest = min(inside, key=lambda n: n["frame"]["width"] * n["frame"]["height"], default=None)
+            node = {k: v for k, v in (smallest or {}).items() if k != "children"}
+            return mock.Mock(stdout=json.dumps([node] if node else []), returncode=0, stderr="")
         if args[0] == "describe-ui":
             tree = self.trees.pop(0) if len(self.trees) > 1 else self.trees[0]
+            self.shown = tree
             return mock.Mock(stdout=tree, returncode=0, stderr="")
         return mock.Mock(stdout="", returncode=0, stderr="")
 
@@ -561,7 +580,7 @@ class SimulatorTrailTests(unittest.TestCase):
     B = sim_tree("Demo", button("Done"), button("Back", 400))
 
     def setUp(self) -> None:
-        fast_ui.invalidate_hierarchy("SIM")
+        fast_ui.invalidate_hierarchy("SIM")  # the screen just moved: a tap checks its control at its point
         fast_ui.TRAIL = fast_ui_map.Trail("com.example.app")
         self.addCleanup(setattr, fast_ui, "TRAIL", None)
         sleep = mock.patch.object(fast_ui.time, "sleep")
@@ -594,7 +613,7 @@ class SimulatorTrailTests(unittest.TestCase):
     def test_trail_skips_prompt_taps_and_scroll_inner_swipes(self) -> None:
         prompt = sim_tree("Demo", *prompt_sheet(NOTIFICATIONS, "Allow", "Don’t Allow"))
         bottom = sim_tree("Demo", button("Done"), button("Bottom", 700))
-        fake = FakeAxe(prompt, self.A, self.A, self.B, self.B, bottom)
+        fake = FakeAxe(prompt, self.A, self.B, self.B, bottom)  # the tap confirms Go at its point, no second read
         trail = self.run_actions(fake, {"type": "tap_label", "label": "Go"}, {"type": "scroll_to", "label": "Bottom"},
                                  prompts=["Allow"])
         self.assertEqual([entry["gesture"]["type"] for entry in trail if "gesture" in entry], ["tap_label", "scroll_to"])
@@ -2629,6 +2648,52 @@ class DoVarsTests(unittest.TestCase):
                 self.assertIn(f"step 1: {words}", str(caught.exception))
                 self.assertIn("simulator only", str(caught.exception))
         fast_device.prepare_flow({"vars": {"a": "b"}, "actions": [{"type": "tap_label", "label": "Go"}]})
+
+
+class SteadyTapTests(unittest.TestCase):
+    """A tap checks its control stopped moving only when the screen may still move, and then by one
+    read at the control's point (about 0.4 s) before a whole screen read (about 1 s)."""
+
+    BUTTON = {"AXLabel": "Join", "type": "Button", "frame": {"x": 100, "y": 500, "width": 200, "height": 50}}
+
+    def setUp(self) -> None:
+        fast_ui.invalidate_hierarchy("SIM")
+        fast_ui._SCREEN_CHANGED.pop("SIM", None)
+        self.calls: list[tuple[str, ...]] = []
+
+    def axe(self, udid: str, *args: str, **_: Any) -> subprocess.CompletedProcess:
+        self.calls.append(args)
+        if args[:2] == ("describe-ui", "--point"):
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps([self.BUTTON]), stderr="")
+        if args[:1] == ("describe-ui",):
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps([self.BUTTON]), stderr="")
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    def kinds(self) -> list[str]:
+        return ["point" if c[:2] == ("describe-ui", "--point") else c[0] for c in self.calls]
+
+    def tap(self) -> None:
+        fast_ui.execute_action({"type": "tap_label", "label": "Join"}, "SIM", Path("/tmp"), 1, [])
+
+    def test_a_still_control_is_confirmed_by_one_point_read(self) -> None:
+        fast_ui._SCREEN_CHANGED["SIM"] = fast_ui.time.perf_counter()
+        with mock.patch.object(fast_ui, "axe", side_effect=self.axe), mock.patch.object(fast_ui.time, "sleep"):
+            self.tap()
+        self.assertEqual(["describe-ui", "point", "touch"], self.kinds())
+        self.assertEqual(("describe-ui", "--point", "200,525"), self.calls[1])
+
+    def test_a_screen_quiet_since_the_last_action_is_tapped_at_once(self) -> None:
+        fast_ui._SCREEN_CHANGED["SIM"] = fast_ui.time.perf_counter() - fast_ui.STEADY_QUIET - 1
+        with mock.patch.object(fast_ui, "axe", side_effect=self.axe), mock.patch.object(fast_ui.time, "sleep"):
+            self.tap()
+            self.calls.clear()
+            self.tap()
+        self.assertEqual(["describe-ui", "point", "touch"], self.kinds(), "right after a tap the screen may still move")
+
+    def test_a_new_process_does_not_take_the_screen_for_quiet(self) -> None:
+        with mock.patch.object(fast_ui, "axe", side_effect=self.axe), mock.patch.object(fast_ui.time, "sleep"):
+            self.tap()
+        self.assertIn("point", self.kinds(), "a `do` before this one may have just opened a sheet")
 
 
 if __name__ == "__main__":

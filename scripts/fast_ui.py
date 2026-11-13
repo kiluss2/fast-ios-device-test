@@ -179,13 +179,26 @@ DESCRIBE_UI_ATTEMPTS = 3
 # A describe-ui call costs about a second of AXe session setup; a tree younger than
 # this, taken by the wait that just succeeded, is still the screen the tap lands on.
 HIERARCHY_REUSE = 0.3
-_HIERARCHY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# Per simulator: (when the read ended, its nodes, when it started on the monotonic clock).
+_HIERARCHY_CACHE: dict[str, tuple[float, list[dict[str, Any]], float]] = {}
+# Per simulator: when the last action that can move the screen (a gesture, a launch, typing) ended,
+# on the monotonic clock (perf_counter paces the waits).
+_SCREEN_CHANGED: dict[str, float] = {}
 # The running flow's screen-map trail (fast_ui_map.Trail); None when FAST_UI_MAP=0.
 TRAIL: Trail | None = None
 
 
 def invalidate_hierarchy(udid: str) -> None:
     _HIERARCHY_CACHE.pop(udid, None)
+    _SCREEN_CHANGED[udid] = time.monotonic()
+
+
+def read_on_quiet_screen(udid: str) -> bool:
+    """True when the last screen read began STEADY_QUIET s or more after the last action that could
+    move the screen ended: a sheet or a push has finished sliding by then. Never in a process that has
+    not moved the screen itself, since a `do` before it may just have opened a sheet."""
+    cached, changed = _HIERARCHY_CACHE.get(udid), _SCREEN_CHANGED.get(udid)
+    return cached is not None and changed is not None and cached[2] - changed >= STEADY_QUIET
 
 
 def not_booted(error: Exception) -> bool:
@@ -203,9 +216,10 @@ def hierarchy(udid: str, max_age: float = 0.0) -> list[dict[str, Any]]:
     last_error: Exception | None = None
     for attempt in range(DESCRIBE_UI_ATTEMPTS):
         try:
+            started = time.monotonic()
             result = axe(udid, "describe-ui")
             nodes = list(flatten(json.loads(result.stdout)))
-            _HIERARCHY_CACHE[udid] = (time.perf_counter(), nodes)
+            _HIERARCHY_CACHE[udid] = (time.perf_counter(), nodes, started)
             if TRAIL is not None:
                 TRAIL.read(nodes)
             return nodes
@@ -522,6 +536,8 @@ def resolve_tap_target(
 
 
 STEADY_TIMEOUT = 1.5
+# A sheet or a push has finished sliding this long after the action that started it.
+STEADY_QUIET = 1.0
 
 
 def frame_key(node: dict[str, Any]) -> tuple[int, ...]:
@@ -529,12 +545,30 @@ def frame_key(node: dict[str, Any]) -> tuple[int, ...]:
     return tuple(round(float(frame.get(key, 0) or 0)) for key in ("x", "y", "width", "height"))
 
 
+def point_node(udid: str, x: float, y: float) -> dict[str, Any] | None:
+    """The accessibility element at one point: about 0.4 s, a whole screen read about 1 s."""
+    value = json.loads(axe(udid, "describe-ui", "--point", f"{x:.0f},{y:.0f}").stdout)
+    node = value[0] if isinstance(value, list) and value else value
+    return node if isinstance(node, dict) else None
+
+
 def steady_target(
     udid: str, selector: dict[str, Any], explicit_type: bool, target: dict[str, Any], timeout: float = STEADY_TIMEOUT
 ) -> dict[str, Any]:
     """The target once its frame stops moving. A control on a sheet still sliding in is listed at a
     frame it has already left, so a tap there lands on whatever is under it now and the flow goes on
-    in the wrong state."""
+    in the wrong state. On a screen quiet since the last action it is where it was read; else the
+    element at its point says so when it is the same control at the same frame, and only otherwise
+    the screen is read again until two reads agree."""
+    if read_on_quiet_screen(udid):
+        return target
+    try:
+        here = point_node(udid, *frame_center(target))
+    except (FastUIError, ValueError):
+        here = None
+    if here is not None and str(here.get("AXLabel") or "") == str(target.get("AXLabel") or "") \
+            and frame_key(here) == frame_key(target):
+        return target
     deadline = time.perf_counter() + timeout
     previous = target
     while time.perf_counter() < deadline:
@@ -1712,7 +1746,25 @@ def execute_action(
     bundle_id: str = "",
 ) -> dict[str, Any] | None:
     """Run one action; `defaults` carries flow-wide keys such as `settle` from `setup`,
-    `bundle_id` is the app under test for `launch`/`terminate` without an `app` key."""
+    `bundle_id` is the app under test for `launch`/`terminate` without an `app` key. An action that
+    moved the screen dates the move to its own end, after its gesture, launch or post delay."""
+    changed = _SCREEN_CHANGED.get(udid)
+    try:
+        return perform_action(action, udid, artifacts, index, optional_prompt_labels, defaults, bundle_id)
+    finally:
+        if _SCREEN_CHANGED.get(udid) != changed:
+            _SCREEN_CHANGED[udid] = time.monotonic()
+
+
+def perform_action(
+    action: dict[str, Any],
+    udid: str,
+    artifacts: Path,
+    index: int,
+    optional_prompt_labels: list[str],
+    defaults: dict[str, Any] | None = None,
+    bundle_id: str = "",
+) -> dict[str, Any] | None:
     kind = required(action, "type", f"action {index}")
     if TRAIL is not None:
         TRAIL.start_action()

@@ -14,6 +14,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: fast.device.runner
         GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: UITests/FastDeviceUITests-Bridging-Header.h
 schemes:
   FastDevice:
     build:

@@ -59,6 +59,9 @@ final class FlowRunner: XCTestCase {
     // instead of ending the test, which would take the persistent runner down with it.
     private var isRunningAction = false
     private var actionIssue: String?
+    // Taps go straight to XCTest's event synthesizer (DirectTouch.m) unless a request or a flow's
+    // setup says `"touch": "xcuitest"`.
+    private var xcuitestTaps = false
 
     override func record(_ issue: XCTIssue) {
         guard isRunningAction else { return super.record(issue) }
@@ -131,6 +134,7 @@ private extension FlowRunner {
             // A `do` goes on from the screen the previous one ended on; a flow starts clean.
             trail.start(carry: operation == "action" || operation == "actions", now: Date().timeIntervalSinceReferenceDate)
             promptEntries = request["optional_permission_labels"] as? [Any] ?? []
+            xcuitestTaps = (request["touch"] as? String) == "xcuitest"
             let skipIdle = (request["wait_for_idle"] as? Bool) == false
             if skipIdle { idleNote["wait_for_idle"] = Quiescence.disable() ? false : "unsupported" }
             defer { if skipIdle { Quiescence.restore() } }
@@ -188,6 +192,7 @@ private extension FlowRunner {
         var results: [[String: Any]] = []
         var step = "launch"
         let setup = flow["setup"] as? [String: Any] ?? [:]
+        if let touch = setup["touch"] as? String { xcuitestTaps = touch == "xcuitest" }
         let previousAppearance = XCUIDevice.shared.appearance
         defer { XCUIDevice.shared.appearance = previousAppearance }
         orientationChanged = false
@@ -1128,8 +1133,26 @@ private extension FlowRunner {
 
     func tap(_ x: Double, _ y: Double, _ postDelay: Double) {
         trail.touch()
-        point(x, y).tap()
+        if let orientation = directTouchOrientation() {
+            // Held like the Simulator's tap, so Liquid Glass controls take it; a touch XCTest sent
+            // but did not confirm fails the step rather than being sent again.
+            if let why = FDTDirectTap(CGPoint(x: x, y: y), 0.08, orientation, 5) {
+                actionIssue = actionIssue ?? "direct touch at \(Int(x)),\(Int(y)): \(why)"
+            }
+        } else {
+            point(x, y).tap()
+        }
         Thread.sleep(forTimeInterval: postDelay)
+    }
+
+    // The UIInterfaceOrientation a direct touch is sent in: portrait only, where screen points are
+    // the snapshot's frames; nil keeps XCUICoordinate's tap (asked for, sideways, or no private API).
+    func directTouchOrientation() -> Int? {
+        guard !xcuitestTaps, FDTDirectTouchAvailable() else { return nil }
+        switch XCUIDevice.shared.orientation {
+        case .portrait, .faceUp, .faceDown, .unknown: return UIInterfaceOrientation.portrait.rawValue
+        default: return nil
+        }
     }
 
     // An action's `duration` as a drag speed; XCUITest's default speed without one.

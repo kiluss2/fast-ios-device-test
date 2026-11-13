@@ -87,8 +87,10 @@ Supported actions:
 - `tap_label`: accessibility tap; resolves the selector through the same polling
   loop as `wait`, so a permission alert that appears between actions is dismissed
   instead of swallowing the tap. Pass `optional: true` to skip that resolution and
-  tolerate a missing control. Before tapping it re-reads the control until its frame
-  stops moving (up to 1.5 s), so a tab on a sheet still sliding in is hit where it lands.
+  tolerate a missing control. Unless the screen has been still for 1 s since the last action,
+  it checks the control stopped moving before tapping, so a tab on a sheet still sliding in is hit
+  where it lands: on the Simulator one read at the control's point (about 0.4 s), and only when that
+  shows another element the screen is read again until the frame agrees (up to 1.5 s).
 - `tap_point`: tap a declared coordinate.
 - `set_switch`: `on` `true`/`false` on the switch a selector names (a caption with the same label
   is skipped). It touches only when the value differs, waits until the switch reads the new value
@@ -432,6 +434,12 @@ fastDeviceTest lock --device <d>                       # end of the work: stop +
 - `do` skips XCUITest's wait-for-idle by default (`--idle-wait` keeps it); a flow skips it with
   `setup.wait_for_idle: false`. The runner then waits for the layout itself; the report shows
   `wait_for_idle`.
+- Taps (`tap_label`, `tap_point`, `tap_first`, …) go straight to XCTest's event synthesizer, as
+  WebDriverAgent does, held 0.08 s: about 0.25 s sooner than `XCUICoordinate.tap()` on taps the
+  screen answers quickly (checked on iOS 18.5, and on iOS 27.2.1 Liquid Glass tab bars and back
+  buttons); a tap that opens a screen gains nothing, the transition is the wait.
+  `setup.touch: "xcuitest"` (or `"touch": "xcuitest"` in a request) taps through XCUITest again; a
+  sideways iPhone or an Xcode without the private event record does by itself.
 - Signing: an existing development profile that lists the device and matches a
   non-revoked keychain identity; never the bundle id of an installed app.
   `FAST_DEVICE_PROFILE=<uuid>` pins one.
