@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.16.0 — 2026-11-13
+
+- iPhone: `fastDeviceTest build --project <P> --scheme <S> [--configuration <C>] [--bundle-id <id>]
+  [--install --device <d>]` builds the app for any iPhone into the Simulator flows' `derived_data`
+  (default `build/fast-ui-dd` beside the project) under their build lock, so the two builds run in
+  turn and a project keeps one folder instead of a second one for device builds (one such
+  folder held 6.4 GB). `generic/platform=iOS` leaves a runner on the iPhone alone.
+- Tests: the evidence test's Simulator run no longer leaves a `SIM.lock` lease in
+  `~/Library/Caches/fast-ui/locks`.
+
 ## 1.15.0 — 2026-11-13
 
 - Simulator: `tap_label` no longer reads the whole screen again before every tap (about 1 s each

@@ -2696,5 +2696,96 @@ class SteadyTapTests(unittest.TestCase):
         self.assertIn("point", self.kinds(), "a `do` before this one may have just opened a sheet")
 
 
+
+class DeviceBuildTests(unittest.TestCase):
+    """`fastDeviceTest build` puts the iPhone build in the Simulator flows' derived_data: the -iphoneos
+    products sit beside the -iphonesimulator ones, packages and module cache are kept once, and the
+    one build lock runs the two builds in turn."""
+
+    def setUp(self) -> None:
+        import fast_device
+        self.fast_device = fast_device
+        self.folder = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.folder)
+        self.dd = self.folder / "build/fast-ui-dd"
+
+    def app(self, folder: str, name: str, bundle_id: str) -> Path:
+        import plistlib
+        app = self.dd / "Build/Products" / folder / f"{name}.app"
+        app.mkdir(parents=True)
+        with (app / "Info.plist").open("wb") as handle:
+            plistlib.dump({"CFBundleIdentifier": bundle_id}, handle, fmt=plistlib.FMT_BINARY)
+        return app
+
+    def build(self, *argv: str, returncode: int = 0, output: str = "") -> tuple[mock.Mock, list[str], str]:
+        events: list[str] = []
+
+        @contextlib.contextmanager
+        def lock(path: Path):
+            events.append(f"lock {path}")
+            yield
+            events.append("unlock")
+
+        def xcodebuild(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            events.append("xcodebuild")
+            return subprocess.CompletedProcess(args, returncode, stdout=output, stderr="")
+
+        out = io.StringIO()
+        with mock.patch.object(self.fast_device.fast_ui, "build_lock", lock), \
+                mock.patch.object(self.fast_device, "run", side_effect=xcodebuild) as run, \
+                mock.patch.object(self.fast_device, "install_app") as install, \
+                mock.patch.object(self.fast_device, "resolve_device", return_value={"udid": "U", "name": "Test iPhone"}), \
+                contextlib.redirect_stdout(out):
+            default = ["--derived-data", str(self.dd)] if self.with_derived_data else []
+            self.fast_device.run_command(["build", "--project", str(self.folder / "App.xcodeproj"), "--scheme", "App-DEV",
+                                          *default, *argv])
+        run.install = install
+        return run, events, out.getvalue()
+
+    with_derived_data = True
+
+    def build_without_derived_data(self) -> tuple[mock.Mock, list[str], str]:
+        self.with_derived_data = False
+        return self.build()
+
+    def test_it_builds_for_any_iphone_inside_the_shared_build_lock(self) -> None:
+        self.app("Debug-DEV-iphonesimulator", "App", "com.example.app")
+        built = self.app("Debug-DEV-iphoneos", "App", "com.example.app")
+        run, events, said = self.build("--configuration", "Debug-DEV")
+        args = run.call_args.args[0]
+        self.assertEqual(["lock " + str(self.dd), "xcodebuild", "unlock"], events)
+        self.assertEqual("generic/platform=iOS", args[args.index("-destination") + 1], "no iPhone is touched while it builds")
+        self.assertEqual(str(self.dd), args[args.index("-derivedDataPath") + 1])
+        self.assertEqual("Debug-DEV", args[args.index("-configuration") + 1])
+        self.assertIn("COMPILER_INDEX_STORE_ENABLE=NO", args)
+        self.assertIn(str(built), said)
+        run.install.assert_not_called()
+
+    def test_it_picks_the_iphoneos_app_with_the_bundle_id_and_installs_it(self) -> None:
+        self.app("Debug-iphoneos", "Widgets", "com.example.widgets")
+        app = self.app("Debug-iphoneos", "App", "com.example.app")
+        run, _, said = self.build("--bundle-id", "com.example.app", "--install", "--device", "Test iPhone")
+        run.install.assert_called_once_with("U", str(app))
+        self.assertIn("INSTALLED", said)
+
+    def test_it_will_not_guess_between_several_iphone_apps(self) -> None:
+        self.app("Debug-iphoneos", "App", "com.example.app")
+        self.app("Release-iphoneos", "App", "com.example.app")
+        with self.assertRaisesRegex(self.fast_device.FastDeviceError, r"Debug-iphoneos/App.app.*Release-iphoneos/App.app.*--configuration"):
+            self.build("--bundle-id", "com.example.app", "--install", "--device", "Test iPhone")
+
+    def test_the_derived_data_defaults_to_build_fast_ui_dd_beside_the_project(self) -> None:
+        self.app("Debug-iphoneos", "App", "com.example.app")
+        run, events, _ = self.build_without_derived_data()
+        self.assertEqual(f"lock {self.dd}", events[0])
+        args = run.call_args.args[0]
+        self.assertEqual(str(self.dd), args[args.index("-derivedDataPath") + 1])
+
+    def test_a_failed_build_names_its_error_and_keeps_the_log(self) -> None:
+        with self.assertRaisesRegex(self.fast_device.FastDeviceError, "error: no such module 'Foo'"):
+            self.build(returncode=65, output="CompileSwift normal arm64 A.swift\nA.swift:1:8: error: no such module 'Foo'\n** BUILD FAILED **")
+        self.assertIn("no such module", (self.dd / ".fastdevice-build.log").read_text())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

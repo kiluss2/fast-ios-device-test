@@ -19,7 +19,8 @@ re-signs it with an existing development profile, and runs the flow on the devic
 - **Xcode is chosen per device:** the oldest installed Xcode whose iphoneos SDK
   covers the device's iOS (`FAST_DEVICE_DEVELOPER_DIR` overrides).
 - **The app is not built or fresh-installed.** It drives what is installed;
-  `--install` pushes an iphoneos `.app` first.
+  `--install` pushes an iphoneos `.app` first. `fastDeviceTest build` builds one into
+  the project's Simulator `derived_data` (below).
 - **`setup.preferences` become launch arguments** (typed plist fragments, `$json_data`
   as `<hex>`): the argument domain lasts one launch and is never written, so no
   cleanup is needed. Anything the app itself writes while running does persist.

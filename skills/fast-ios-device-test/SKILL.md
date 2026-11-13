@@ -64,7 +64,8 @@ Everything the engine needs is in the flow; there is no per-project config.
   `build/fast-ui` or `build/fast-device` (pruned after `FAST_UI_KEEP_DAYS`). Throwaway flows may
   stay in the session scratchpad.
 - Absolute paths only (a flow outside the repo must name `project_root`). `simulator` is a UDID from `xcrun simctl list devices available` that
-  nobody else runs the app on. `derived_data` is its own folder, never Xcode's DerivedData;
+  nobody else runs the app on. `derived_data` is the project's one `build/fast-ui-dd`, never
+  Xcode's DerivedData; iPhone builds go there too (`fastDeviceTest build`), never a second one.
   `app_path` is the `.app` inside it. `build_inputs` (source folders + `project.pbxproj`) drive
   the build cache; without them every run rebuilds.
 - Selector keys on `wait`, `wait_absent`, `assert_absent`, `tap_first`, `tap_label`, `long_press`,

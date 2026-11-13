@@ -425,7 +425,18 @@ fastDeviceTest do '{"type":"tap_label","label":"Continue"}' --device <d>   # ~1 
 fastDeviceTest do '{"type":"screenshot","name":"now"}' --device <d> --out <dir>
 fastDeviceTest stop --device <d>
 fastDeviceTest lock --device <d>                       # end of the work: stop + lock the screen
+fastDeviceTest build --project /abs/MyApp/MyApp.xcodeproj --scheme MyApp-DEV \
+  --configuration Debug-DEV --bundle-id com.example.app --install --device <d>
 ```
+
+- `build` builds the app for any iPhone (`generic/platform=iOS`, so a runner on the iPhone is not
+  disturbed) into the Simulator flows' `derived_data` (default `build/fast-ui-dd` beside the
+  project), under their build lock: the `-iphoneos` products sit beside the `-iphonesimulator`
+  ones and the packages are kept once, so a project needs one folder, not one per platform.
+  SwiftLint is skipped as in a Simulator build. It prints `BUILT app=<link>`; `--install` then
+  installs it on `--device` (`INSTALLED device=<name>`). Several built apps are an error that names
+  them: pass `--configuration` and `--bundle-id`. A failed build reads like the Simulator's, with
+  `log=<derived_data>/.fastdevice-build.log`.
 
 - The runner (`device-runner/`, its `.xcodeproj` committed; regenerate with `xcodegen
   generate` after editing `project.yml`) is cached per Xcode + signing profile + runner

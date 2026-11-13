@@ -295,7 +295,9 @@ class EngineTests(Base):
             Image.new("RGB", (1179, 2556), (200, 10, 10)).save(path)
 
         out, err = io.StringIO(), io.StringIO()
+        # main() takes a simulator lease: keep it out of ~/Library/Caches/fast-ui/locks.
         with mock.patch.object(fast_ui.sys, "argv", ["fastSimulatorTest", str(flow), *argv]), \
+                mock.patch.object(fast_ui, "LOCK_DIR", root / "locks"), \
                 mock.patch.object(fast_ui, "prepare_app", return_value=(None, False)), \
                 mock.patch.object(fast_ui, "command"), mock.patch.object(fast_ui, "apply_ui_settings"), \
                 mock.patch.object(fast_ui, "set_preferences"), \

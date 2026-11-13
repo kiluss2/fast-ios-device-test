@@ -28,6 +28,7 @@ from fast_media import VIDEO_SUFFIXES, prune_artifacts, publish_video, shrink_vi
 import fast_evidence  # noqa: E402
 import fast_guard  # noqa: E402
 from fast_ui_map import record  # noqa: E402
+import fast_ui  # noqa: E402  (the Simulator engine's build lock and build-error reading)
 
 DO_OUT = Path.home() / "Library/Caches/fast-ui/do"
 RUNNER_SOURCE = HERE.parent / "device-runner"
@@ -476,6 +477,65 @@ def install_app(udid: str, app_path: str) -> None:
     run(["xcrun", "devicectl", "device", "install", "app", "--device", udid, app_path])
 
 
+def iphone_app(derived_data: Path, configuration: str | None, bundle_id: str | None) -> Path:
+    """The iphoneos `.app` a build left in `derived_data`; several candidates are an error, never a guess."""
+    products = derived_data / "Build/Products"
+    folders = [products / f"{configuration}-iphoneos"] if configuration else sorted(products.glob("*-iphoneos"))
+    found = []
+    for app in (app for folder in folders for app in sorted(folder.glob("*.app"))):
+        try:
+            with (app / "Info.plist").open("rb") as handle:
+                identifier = plistlib.load(handle).get("CFBundleIdentifier")
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        if bundle_id is None or identifier == bundle_id:
+            found.append(app)
+    names = ", ".join(str(app.relative_to(products)) for app in found)
+    if not found:
+        wanted = f" with bundle id {bundle_id}" if bundle_id else ""
+        raise FastDeviceError(f"no iphoneos .app{wanted} in {products}")
+    if len(found) > 1:
+        raise FastDeviceError(f"several iphoneos apps in {products}: {names}; pass --configuration and --bundle-id")
+    return found[0]
+
+
+def build_for_iphone(project: Path, scheme: str, derived_data: Path, configuration: str | None,
+                     bundle_id: str | None, timeout: float) -> Path:
+    """Build the app for any iPhone into the Simulator flows' derived_data, under their build lock.
+
+    The `-iphoneos` products sit beside the `-iphonesimulator` ones, and packages and the module cache
+    are kept once, so a project needs one derived_data, not one per platform. `generic/platform=iOS`
+    builds without touching an iPhone, so a runner driving it is not disturbed."""
+    build = [
+        "xcodebuild", "build", "-workspace" if project.suffix == ".xcworkspace" else "-project", str(project),
+        "-scheme", scheme,
+        "-destination", "generic/platform=iOS",
+        "-derivedDataPath", str(derived_data),
+        "-skipPackagePluginValidation", "-disableAutomaticPackageResolution",
+        "COMPILER_INDEX_STORE_ENABLE=NO", "-quiet",
+    ]
+    if configuration:
+        build[6:6] = ["-configuration", configuration]
+    env = dict(os.environ)
+    lint_state, lint_detail = fast_ui.lint_report(project)
+    if fast_ui.skip_lint_enabled({}):
+        env = fast_ui.lint_skip_env(env)
+    elif lint_state != "none":
+        lint_state = "on"
+    if lint_state != "none":
+        print(f"lint={lint_state}" + (f" ({'; '.join(lint_detail)})" if lint_detail else ""), file=sys.stderr)
+    with fast_ui.build_lock(derived_data):
+        result = run(build, env=env, check=False, timeout=timeout)
+    if result.returncode != 0:
+        # -quiet prints the errors on stdout, so read both streams; keep the whole log.
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        log = derived_data / ".fastdevice-build.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(output, encoding="utf-8")
+        raise FastDeviceError(f"{fast_ui.build_failure(output, lint_state, fast_ui.lint_phase_names(project))} log={file_link(log)}")
+    return iphone_app(derived_data, configuration, bundle_id)
+
+
 def export_attachments(result_bundle: Path, output: Path, developer_dir: str) -> None:
     output.mkdir(parents=True, exist_ok=True)
     for developer in (developer_dir, None):
@@ -904,6 +964,17 @@ def run_command(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"fastDeviceTest {argv[0]}")
     parser.add_argument("--device")
     parser.add_argument("--rebuild-runner", action="store_true")
+    if argv[0] == "build":
+        parser.add_argument("--project", type=Path, required=True, help=".xcodeproj or .xcworkspace")
+        parser.add_argument("--scheme", required=True)
+        parser.add_argument("--configuration")
+        parser.add_argument("--bundle-id", help="Which built .app to report or install")
+        parser.add_argument(
+            "--derived-data", type=Path,
+            help="Default build/fast-ui-dd beside the project: the folder its Simulator flows build in",
+        )
+        parser.add_argument("--install", action="store_true", help="Install the built app on --device")
+        parser.add_argument("--timeout", type=float, default=900, help="Seconds the build may take (default 900)")
     if argv[0] == "do":
         parser.add_argument(
             "action",
@@ -936,6 +1007,16 @@ def run_command(argv: list[str]) -> int:
         risky = fast_guard.risky_step(parsed_actions)
         if risky:
             raise FastDeviceError(f"step {risky[0]}: '{risky[1]}' looks destructive; send it alone or add \"confirm\": true")
+    if argv[0] == "build":
+        project = args.project.expanduser().resolve()
+        derived_data = (args.derived_data or project.parent / "build/fast-ui-dd").expanduser().resolve()
+        app = build_for_iphone(project, args.scheme, derived_data, args.configuration, args.bundle_id, args.timeout)
+        print(f"BUILT app={file_link(app)}")
+        if args.install:
+            device = resolve_device(args.device)
+            install_app(device["udid"], str(app))
+            print(f"INSTALLED device={device['name']}")
+        return 0
     device = resolve_device(args.device)
     udid = device["udid"]
     if argv[0] == "check":
@@ -991,7 +1072,7 @@ def run_command(argv: list[str]) -> int:
 
 def main() -> int:
     argv = sys.argv[1:]
-    if argv and argv[0] in {"serve", "stop", "lock", "status", "do", "check"}:
+    if argv and argv[0] in {"serve", "stop", "lock", "status", "do", "check", "build"}:
         return run_command(argv)
     return run_flow(parse_flow_arguments(argv))
 
