@@ -11,7 +11,7 @@ Read `references/device.md` of the `fast-ios-device-test` skill first
 timing rules are in that skill's `SKILL.md`. The engine is:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT:-$HOME/.local}/bin/fastDeviceTest" <flow.json> [--device <udid|name>] [--install <App.app>]
+"${CLAUDE_PLUGIN_ROOT:-$HOME/.local}/bin/fastDeviceTest" <flow.json> [--device <udid|name>] [--install <App.app> [--fresh-install]]
 ```
 
 Same flow JSON as the simulator; the app must already be installed (build and install it with

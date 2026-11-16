@@ -97,6 +97,35 @@ class RenderTests(unittest.TestCase):
         self.assertLess(two_rows["width"], one_row["width"])
         self.assertGreater(two_rows["height"], one_row["height"])
 
+    def test_without_columns_a_sheet_of_phone_shots_is_landscape(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            make_run(Path(raw), "flow", "20261013-110000-aaaa", "pass")
+            results = {
+                count: sheet.build(write_spec(Path(raw), {"root": raw, "out": f"{count}.png", "cells": [
+                    {"task": "flow", "shot": "main", "label": f"C{i}", "caption": "đóng paywall"} for i in range(count)]}))
+                for count in (7, 15, 30)
+            }
+        for count, result in results.items():
+            self.assertGreaterEqual(result["width"], result["height"], f"{count} cells")
+        self.assertEqual(results[7]["columns"], 7)
+        self.assertEqual(results[15]["columns"], 8)
+        self.assertEqual(results[30]["columns"], 10)
+
+    def test_too_few_cells_for_landscape_stay_on_one_row(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            make_run(Path(raw), "flow", "20261013-110000-aaaa", "pass")
+            result = sheet.build(write_spec(Path(raw), {"root": raw, "out": "a.png", "cells": [
+                {"task": "flow", "shot": "main"} for _ in range(2)]}))
+        self.assertEqual(result["columns"], 2)
+
+    def test_columns_in_the_spec_win_over_the_landscape_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            make_run(Path(raw), "flow", "20261013-110000-aaaa", "pass")
+            result = sheet.build(write_spec(Path(raw), {"root": raw, "out": "a.png", "columns": 4, "cells": [
+                {"task": "flow", "shot": "main"} for _ in range(15)]}))
+        self.assertEqual(result["columns"], 4)
+        self.assertLess(result["width"], result["height"])
+
     def test_long_caption_wraps_inside_the_cell_and_grows_the_row(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             make_run(Path(raw), "flow", "20261013-110000-aaaa", "pass")

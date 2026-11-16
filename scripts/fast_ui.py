@@ -427,6 +427,17 @@ def prompt_target(nodes: list[dict[str, Any]], entries: list[Any]) -> dict[str, 
         choice = prompt_choice(str(sheet.get("AXLabel") or ""), [str(b.get("AXLabel")) for b in own], entries)
         if choice is not None:
             return next(button for button in own if button.get("AXLabel") == choice)
+    # A prompt the app draws in its own tree (StoreKit's "Enjoying …?" rating prompt) is answered
+    # by a rule only, when its title text and its button are both on screen. Mirrors
+    # PromptRules.screenChoice in the device runner.
+    texts = [str(node.get("AXLabel") or "").casefold() for node in nodes]
+    for rule in entries:
+        fragment = str(rule.get("title_contains") or "").casefold() if isinstance(rule, dict) else ""
+        if fragment and any(fragment in text for text in texts):
+            button = next((button for button in buttons if button.get("AXLabel") == rule.get("tap")
+                           and not any(button is other for other in in_sheets)), None)
+            if button is not None:
+                return button
     labels = [entry for entry in entries if isinstance(entry, str)]
     if on_app_screen(nodes):
         # The app's own screen: an "Allow" or "OK" outside a sheet there is the app's UI,

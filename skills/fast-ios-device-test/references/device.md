@@ -7,7 +7,7 @@ New iPhone, or a run that fails before any step: `fastDeviceTest check --device 
 lists pairing, connection, Developer Mode, the Xcode and signing profile it will use, and the
 fix for each gap ([../../../SETUP.md](../../../SETUP.md) has the whole setup).
 
-`fastDeviceTest <flow.json> [--device <udid|name>] [--install <App.app>]` builds a
+`fastDeviceTest <flow.json> [--device <udid|name>] [--install <App.app> [--fresh-install]]` builds a
 generic XCUITest runner once (cached in `~/Library/Caches/fast-device-test`),
 re-signs it with an existing development profile, and runs the flow on the device.
 
@@ -19,11 +19,16 @@ re-signs it with an existing development profile, and runs the flow on the devic
 - **Xcode is chosen per device:** the oldest installed Xcode whose iphoneos SDK
   covers the device's iOS (`FAST_DEVICE_DEVELOPER_DIR` overrides).
 - **The app is not built or fresh-installed.** It drives what is installed;
-  `--install` pushes an iphoneos `.app` first. `fastDeviceTest build` builds one into
-  the project's Simulator `derived_data` (below).
+  `--install` pushes an iphoneos `.app` first, and `--install <.app> --fresh-install`
+  removes the app and its data before that, for a run from a first launch (keychain items
+  survive). `fastDeviceTest build` builds the `.app` into the project's Simulator
+  `derived_data` (below).
 - **`setup.preferences` become launch arguments** (typed plist fragments, `$json_data`
   as `<hex>`): the argument domain lasts one launch and is never written, so no
-  cleanup is needed. Anything the app itself writes while running does persist.
+  cleanup is needed. Anything the app itself writes while running does persist, but
+  **during that launch the argument wins over the app's own write**: seed `usedCount: 0`
+  and the app reads 0 after every increment. Never seed a key the flow expects the app to
+  change (a counter, a "seen" flag set mid-run); start from `--fresh-install` instead.
 - **Other apps:** add `"app": "<bundle id>"` to an action to drive Settings,
   Shortcuts or SpringBoard from that step on; `activate` / `launch` / `terminate`
   act on the current app. Permission alerts are looked up on SpringBoard (XCUITest reports
@@ -156,6 +161,10 @@ agent's xcodebuild run on the same iPhone will collide with it. A device that al
 runner is refused ("is busy"); pick another iPhone, never `stop` a runner you did not start.
 A runner this Mac started that no longer answers (after an idle-out, while xcodebuild
 collects diagnostics) is ended and replaced; a locked iPhone is reported in seconds.
+An iPhone `devicectl` lists as not connected because its tunnel went idle (after a run) is
+woken with one request before the flow is refused. A one-shot run whose XCTest times out
+"enabling automation mode" (nothing of the flow ran) starts once more by itself; the result
+line then says `retried=…`.
 
 - Artifacts: `~/Library/Caches/fast-ios-device-test/artifacts/<project>-<hash>/fast-device/<task>/<run>/` (outside the project; `fastDeviceTest clean --list`) with screenshots,
   `failure.png`, `failure-ui.txt`, `metrics.json`, the `.xcresult` and, with `--record`,

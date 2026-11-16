@@ -19,7 +19,8 @@
 task's latest PASSING run (pin one with `"run": "<run folder name>"`); an `image` cell takes
 any file. Relative paths resolve against the spec file. `out` ending in `.jpg` (the default)
 writes review quality (JPEG 80, ~250 KB for seven phone shots); `.png` keeps it lossless.
-Optional: `columns` (cells per row, default 7) and `cell_width` (px, default 360).
+Optional: `columns` (cells per row; left out, the sheet comes out landscape, about 16:10)
+and `cell_width` (px, default 360).
 
 Every cell is checked before anything is drawn, so one run reports every missing shot.
 
@@ -36,7 +37,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -60,6 +61,8 @@ TITLE_SIZE, LABEL_SIZE, CAPTION_SIZE = 34, 22, 20
 LINE_SPACING = 4
 JPEG_QUALITY = 80
 PIXELS_PER_TOKEN = 750
+# Reviewers read the sheet on a landscape desktop screen.
+LANDSCAPE_RATIO = 16 / 10
 
 
 class SheetError(RuntimeError):
@@ -148,7 +151,26 @@ def wrap(text: str, typeface: ImageFont.ImageFont, width: int) -> list[str]:
     return lines
 
 
-def render(cells: list[dict[str, Any]], images: list[Path], out: Path, title: str = "", columns: int = 7, cell_width: int = 360) -> dict[str, Any]:
+def landscape_columns(count: int, layout: Callable[[int], tuple[Any, int, int]]) -> int:
+    """Cells per row for a sheet read on a landscape desktop screen: among the row counts that
+    leave the sheet wider than tall, the one closest to 16:10. Phone shots are ~2.6 times taller
+    than wide, so 7 cells take one row, 15 take two of 8, 30 take three of 10. Too few cells for
+    any landscape layout stay on one row, the widest there is."""
+    best, best_distance = count, math.inf
+    for rows in range(1, count + 1):
+        columns = math.ceil(count / rows)
+        if math.ceil(count / columns) != rows:
+            continue
+        _, width, height = layout(columns)
+        if width < height:
+            break
+        distance = abs(math.log(width / height / LANDSCAPE_RATIO))
+        if distance < best_distance:
+            best, best_distance = columns, distance
+    return best
+
+
+def render(cells: list[dict[str, Any]], images: list[Path], out: Path, title: str = "", columns: int | None = None, cell_width: int = 360) -> dict[str, Any]:
     title_font, label_font, caption_font = font(TITLE_SIZE), font(LABEL_SIZE), font(CAPTION_SIZE)
     thumbs = []
     for path in images:
@@ -157,20 +179,23 @@ def render(cells: list[dict[str, Any]], images: list[Path], out: Path, title: st
             thumbs.append(image.resize((cell_width, round(image.height * cell_width / image.width)), Image.LANCZOS))
     captions = [wrap(str(cell.get("caption", "")), caption_font, cell_width) if cell.get("caption") else [] for cell in cells]
     labels = [wrap(str(cell.get("label", "")), label_font, cell_width) if cell.get("label") else [] for cell in cells]
-    columns = max(1, min(columns, len(cells)))
-    rows = math.ceil(len(cells) / columns)
     label_line, caption_line = LABEL_SIZE + LINE_SPACING + 4, CAPTION_SIZE + LINE_SPACING + 2
     title_height = TITLE_SIZE + MARGIN if title else 0
+    text_heights = [len(labels[i]) * label_line + len(captions[i]) * caption_line for i in range(len(cells))]
+    thumb_heights = [thumb.height for thumb in thumbs]
 
-    row_layout = []
-    for row in range(rows):
-        members = range(row * columns, min((row + 1) * columns, len(cells)))
-        text_height = max(len(labels[i]) * label_line + len(captions[i]) * caption_line for i in members)
-        text_height = text_height + 8 if text_height else 0
-        row_layout.append((members, text_height, max(thumbs[i].height for i in members)))
+    def layout(count: int) -> tuple[list[tuple[range, int, int]], int, int]:
+        rows = []
+        for row in range(math.ceil(len(cells) / count)):
+            members = range(row * count, min((row + 1) * count, len(cells)))
+            text_height = max(text_heights[i] for i in members)
+            rows.append((members, text_height + 8 if text_height else 0, max(thumb_heights[i] for i in members)))
+        width = MARGIN + count * (cell_width + GAP) - GAP + MARGIN
+        height = MARGIN + title_height + sum(text + thumb + GAP for _, text, thumb in rows) - GAP + MARGIN
+        return rows, width, height
 
-    width = MARGIN + columns * (cell_width + GAP) - GAP + MARGIN
-    height = MARGIN + title_height + sum(text + thumb + GAP for _, text, thumb in row_layout) - GAP + MARGIN
+    columns = max(1, min(columns, len(cells))) if columns else landscape_columns(len(cells), layout)
+    row_layout, width, height = layout(columns)
     sheet = Image.new("RGB", (width, height), BACKGROUND)
     draw = ImageDraw.Draw(sheet)
     y = MARGIN
@@ -198,7 +223,7 @@ def render(cells: list[dict[str, Any]], images: list[Path], out: Path, title: st
     else:
         sheet.save(out, "JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
     return {
-        "path": str(out), "cells": len(cells), "width": width, "height": height,
+        "path": str(out), "cells": len(cells), "columns": columns, "width": width, "height": height,
         "kilobytes": round(out.stat().st_size / 1024), "tokens": math.ceil(width * height / PIXELS_PER_TOKEN),
     }
 
@@ -221,7 +246,7 @@ def build(spec_path: Path) -> dict[str, Any]:
     out = resolve(spec.get("out") or f"{spec_path.stem}.jpg", base)
     return render(
         cells, images, out, str(spec.get("title", "")),
-        int(spec.get("columns", 7)), int(spec.get("cell_width", 360)),
+        int(spec["columns"]) if spec.get("columns") else None, int(spec.get("cell_width", 360)),
     )
 
 
@@ -260,7 +285,7 @@ def main() -> int:
         print(f"FAIL error={error}", file=sys.stderr)
         return 1
     print(
-        f"SHEET cells={result['cells']} size={result['width']}x{result['height']} "
+        f"SHEET cells={result['cells']} columns={result['columns']} size={result['width']}x{result['height']} "
         f"kb={result['kilobytes']} tokens≈{result['tokens']} path={Path(result['path']).resolve().as_uri()}"
     )
     return 0

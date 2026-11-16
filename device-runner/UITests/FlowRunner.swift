@@ -890,6 +890,7 @@ private extension FlowRunner {
         repeat {
             if dismissPrompt() { continue }
             nodes = snapshotNodes()
+            if dismissScreenPrompt(nodes) { continue }
             if predicate(nodes) { return nodes }
             Thread.sleep(forTimeInterval: 0.2)
         } while Date() < deadline
@@ -917,6 +918,27 @@ private extension FlowRunner {
             return true
         }
         return false
+    }
+
+    // StoreKit's rating prompt is drawn in the app's own tree, where `dismissPrompt` never looks;
+    // a flow answers it with a rule. Reads the snapshot just taken, so flows without rules pay nothing.
+    func dismissScreenPrompt(_ nodes: [Node]) -> Bool {
+        let rules = promptEntries.compactMap { $0 as? [String: Any] }
+        guard !rules.isEmpty else { return false }
+        let visible = nodes.filter(isOnScreen)
+        let buttons = visible.filter { $0.type == "Button" }
+        guard let choice = PromptRules.screenChoice(texts: visible.map(\.label), buttons: buttons.map(\.label),
+                                                    entries: promptEntries),
+              let button = buttons.first(where: { $0.label == choice }) else { return false }
+        let fragments = rules.filter { $0["tap"] as? String == choice }.compactMap { $0["title_contains"] as? String }
+        let title = visible.first { node in
+            fragments.contains { node.label.range(of: $0, options: .caseInsensitive) != nil }
+        }?.label ?? choice
+        point(button.frame.midX, button.frame.midY).tap()
+        let entry = ["title": title, "tapped": choice]
+        if dismissed.last != entry { dismissed.append(entry) }
+        Thread.sleep(forTimeInterval: 0.3)
+        return true
     }
 
     // iOS 27 reports a UIAlertController as a sheet (iOS 26 and earlier: an alert); one query

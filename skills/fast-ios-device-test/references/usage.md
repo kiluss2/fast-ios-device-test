@@ -285,9 +285,13 @@ StoreKit call; the sheet persists across fresh installs. A flow that taps a link
 exception: `Cancel` also dismisses its "Open in “<App>”?" prompt and the link is lost, so declare
 `Open` there instead.
 
-The App Store review sheet ("Enjoying <App>? … Not Now", from `requestReview`) is not in the
-accessibility tree, so no label can dismiss it, and it swallows the next tap while it is up. Find
-`Not Now` on a `screenshot` and close it with `tap_point` before the next tap.
+The App Store review sheet ("Enjoying <App>? … Not Now", from `requestReview`; a debug build
+shows it every time it is asked for) swallows the next tap while it is up. On the iPhone it sits
+in the app's own tree, not in an alert, so only a rule answers it: declare
+`{"title_contains": "Enjoying", "tap": "Not Now"}` and every wait, tap and `expect` closes it
+when it comes, whenever it comes. A bare `Not Now` never does: the app's own screens use that
+label too. On the Simulator it is not in the accessibility tree at all: find `Not Now` on a
+`screenshot` and close it with `tap_point` before the next tap.
 
 `tap_nearest` may declare a `success` selector and one or more `dismiss`
 selectors. If a declared modal appears instead of success, the runner dismisses
@@ -523,8 +527,9 @@ outcome step. Nothing else is filed: `do`, `--build-only`, other failures.
 
 ```
 ~/Desktop/<project> <ticket>/          FAST_EVIDENCE_DIR overrides ~/Desktop
-  <ticket>.jpg                         captioned sheet: attach it
-  <case>.mp4, <case>-before.mp4        the run's clip (--record), already 960 px
+  evidence/                            what the PR attaches, and only that: attach it whole
+    <ticket>.jpg                       captioned sheet
+    <case>.mp4, <case>-before.mp4      the run's clip (--record), already 960 px
   source/sheet.json                    fastEvidenceSheet spec: edit, then render again
   source/shots/<case>/<role>-<shot>.jpg   720 px, JPEG 80, ~50–150 KB
 ```
@@ -547,7 +552,7 @@ outcome step. Nothing else is filed: `do`, `--build-only`, other failures.
 - **Text**: `evidence.label` (default `<task> · <device>`, `· before` added for before cells),
   `evidence.caption` (default: the flow's `expect`), `evidence.before_caption`.
   `evidence.shots` picks and orders the shots; `evidence.sheet` names another sheet
-  (`<sheet>.jpg`, spec `source/sheet-<sheet>.json`).
+  (`evidence/<sheet>.jpg`, spec `source/sheet-<sheet>.json`).
 
 ```json
 "evidence": {"label": "G2 · Off", "caption": "reopen: false → no paywall",
@@ -566,6 +571,9 @@ outcome step. Nothing else is filed: `do`, `--build-only`, other failures.
   folder; outside git it fails and says to set `FAST_EVIDENCE_TICKET`. A flow there is outside
   the repo, so it names `app.project_root` (and `derived_data`, `app_path`) as absolute paths.
 - The folder is the user's to attach and delete after the merge; the tool never uploads.
+  Anything else the PR shows (a dashboard screenshot, a Jira picture) goes into `evidence/` too,
+  so the user attaches one folder and misses nothing. Folders filed before 1.19.0 keep the files
+  at the top level.
 
 ## Evidence sheet for a PR (`fastEvidenceSheet`)
 
@@ -579,7 +587,6 @@ outcome of each case.
   "title": "PRJ-12 · Paywall gating (Staging, iPhone iOS 26.6)",
   "root": "/abs/MyApp/build/evidence-prj-12/device",
   "out": "/abs/MyApp/build/evidence-prj-12/pr/gating.jpg",
-  "columns": 7,
   "cells": [
     {"task": "gating-prod", "shot": "1-paywall", "label": "G1 · Production", "caption": "paywall on reopen"},
     {"task": "gating-off", "shot": "main", "label": "G2 · Off", "caption": "reopen: false →\nno paywall"},
@@ -594,11 +601,15 @@ outcome of each case.
   from a failing run. An `image` cell takes any file. Relative paths resolve against the
   spec file. A filed PASS run keeps only `metrics.json`; its `task` cells take the filed shot.
 - Captions wrap to the cell (`\n` forces a break); the font covers Vietnamese and other
-  diacritics. Cells are 360 px wide (`cell_width`), `columns` per row (default 7).
+  diacritics. Cells are 360 px wide (`cell_width`).
+- Reviewers read the sheet on a landscape desktop screen, so without `columns` it comes out
+  landscape, about 16:10: phone shots are ~2.6× taller than wide, so 7 cells take one row,
+  15 take two rows of 8, 30 take three of 10. Set `columns` only for a reason (a before/after
+  pair per row); order the cells so each group starts a row where it can.
 - `out` ending in `.jpg` (the default) writes JPEG quality 80: seven phone shots are
   ~300 KB and still readable at 2× zoom. `.png` keeps it lossless (~3× larger).
 - Every cell is checked first; one FAIL line lists every missing shot together with the
-  shots that run does have. Success prints `SHEET cells=… size=WxH kb=… tokens≈… path=file://…`.
+  shots that run does have. Success prints `SHEET cells=… columns=… size=WxH kb=… tokens≈… path=file://…`.
   Read the sheet back before handing it over.
 
 ## Matrix: appearance and Dynamic Type

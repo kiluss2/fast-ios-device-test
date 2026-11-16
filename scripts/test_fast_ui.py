@@ -884,6 +884,20 @@ class PromptRuleTests(unittest.TestCase):
         nodes = prompt_sheet(NOTIFICATIONS, "Don’t Allow", "Allow")
         self.assertEqual(fast_ui.prompt_target(nodes, ["Allow", "Don’t Allow"])["AXLabel"], "Allow")
 
+    RATING = [
+        {"AXLabel": "Enjoying App?", "type": "StaticText", "frame": {"x": 60, "y": 300, "width": 280, "height": 20}},
+        {"AXLabel": "1 star unselected", "type": "Button", "frame": {"x": 80, "y": 360, "width": 30, "height": 30}},
+        {"AXLabel": "Not Now", "type": "Button", "frame": {"x": 60, "y": 420, "width": 280, "height": 44}},
+    ]
+
+    def test_a_rule_answers_a_prompt_drawn_inside_the_app(self) -> None:
+        target = fast_ui.prompt_target(self.RATING, [{"title_contains": "Enjoying", "tap": "Not Now"}])
+        self.assertEqual(target["AXLabel"], "Not Now")
+
+    def test_a_rule_whose_title_is_not_on_screen_taps_nothing_in_the_app(self) -> None:
+        nodes = [node for node in self.RATING if node["type"] == "Button"]
+        self.assertIsNone(fast_ui.prompt_target(nodes, [{"title_contains": "Enjoying", "tap": "Not Now"}]))
+
     def test_wait_taps_the_rules_button_and_carries_on(self) -> None:
         sheet = prompt_sheet(TRACKING, "Ask App Not to Track", "Allow")
         home = [{"AXLabel": "Home", "type": "Button", "frame": {"x": 0, "y": 0, "width": 50, "height": 50}}]
@@ -2401,6 +2415,123 @@ FlowRunner.swift:403: Expected failure in -[FastDeviceUITests.FlowRunner testSer
 
 import fast_vars  # noqa: E402
 import fast_guard  # noqa: E402
+
+
+class DeviceRecoveryTests(unittest.TestCase):
+    """Transient iPhone states a run gets past by itself: an idle CoreDevice tunnel, XCTest
+    timing out while it enables automation mode."""
+
+    DEVICE = {"udid": "U0000000", "name": "X", "os": "26.0", "connected": False}
+
+    def write_flow(self, raw: str, **app: object) -> Path:
+        flow = Path(raw) / "home.json"
+        flow.write_text(json.dumps({"version": 1, "app": {"bundle_id": "com.example.app", **app}, "actions": []}))
+        return flow
+
+    def run_flow(self, raw: str, argv: list[str], connected_after_wake: bool, commands: list[list[str]]) -> int:
+        import fast_device
+
+        def fake_run(args: list[str], *_: object, **__: object) -> subprocess.CompletedProcess[str]:
+            commands.append(list(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        woken = {**self.DEVICE, "connected": connected_after_wake}
+        with mock.patch.object(fast_device, "resolve_device", return_value=dict(self.DEVICE)), \
+                mock.patch.object(fast_device, "physical_devices", return_value=[woken]), \
+                mock.patch.object(fast_device, "run", side_effect=fake_run), \
+                mock.patch.object(fast_device, "server_alive", return_value=True), \
+                mock.patch.object(fast_device, "request", return_value={"status": "pass", "results": [], "labels": []}), \
+                mock.patch.object(fast_device, "record"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return fast_device.run_flow(fast_device.parse_flow_arguments(argv + ["--artifacts-root", raw]))
+
+    def test_an_idle_tunnel_is_woken_before_the_flow_runs(self) -> None:
+        commands: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as raw:
+            code = self.run_flow(raw, [str(self.write_flow(raw))], True, commands)
+        self.assertEqual(code, 0)
+        self.assertIn(["xcrun", "devicectl", "device", "info", "lockState", "--device", "U0000000"], commands)
+
+    def test_an_iphone_still_unreachable_after_the_wake_is_reported(self) -> None:
+        import fast_device
+        with tempfile.TemporaryDirectory() as raw, self.assertRaisesRegex(fast_device.FastDeviceError, "is not connected"):
+            self.run_flow(raw, [str(self.write_flow(raw))], False, [])
+
+    def test_fresh_install_removes_the_app_before_installing_it(self) -> None:
+        commands: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as raw:
+            flow = self.write_flow(raw)
+            self.run_flow(raw, [str(flow), "--install", f"{raw}/App.app", "--fresh-install"], True, commands)
+        devicectl = [c for c in commands if c[:3] == ["xcrun", "devicectl", "device"] and c[3] in ("uninstall", "install")]
+        self.assertEqual(devicectl, [
+            ["xcrun", "devicectl", "device", "uninstall", "app", "--device", "U0000000", "com.example.app"],
+            ["xcrun", "devicectl", "device", "install", "app", "--device", "U0000000", f"{raw}/App.app"],
+        ])
+
+    def test_fresh_install_needs_an_app_to_install(self) -> None:
+        import fast_device
+        with tempfile.TemporaryDirectory() as raw, \
+                self.assertRaisesRegex(fast_device.FastDeviceError, "--fresh-install needs --install"):
+            self.run_flow(raw, [str(self.write_flow(raw)), "--fresh-install"], True, [])
+
+    def one_shot(self, outcomes: list[str]) -> tuple[dict, int]:
+        """Runs run_one_shot against xcodebuild outcomes: "timeout" (XCTest never enabled
+        automation mode), "pass" or "fail" (the flow ran and wrote its result)."""
+        import fast_device
+        calls = {"xcodebuild": 0}
+
+        def fake_run(args: list[str], *_: object, **__: object) -> subprocess.CompletedProcess[str]:
+            if args[0] != "xcodebuild":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            outcome = outcomes[calls["xcodebuild"]]
+            calls["xcodebuild"] += 1
+            bundle = Path(args[args.index("-resultBundlePath") + 1])
+            self.assertFalse(bundle.exists(), "a rerun starts without the earlier result bundle")
+            bundle.mkdir()
+            if outcome == "timeout":
+                return subprocess.CompletedProcess(args, 65, "", (
+                    "Failed to initialize for UI testing: Error Domain=com.apple.dt.XCTest.XCTFuture Code=1000 "
+                    '"Timed out while enabling automation mode."'))
+            (bundle / "result.json").write_text(json.dumps(
+                {"status": outcome, "results": []} | ({} if outcome == "pass" else {"step": 3, "error": "no Home"})))
+            return subprocess.CompletedProcess(args, 0 if outcome == "pass" else 65, "", "")
+
+        def fake_export(bundle: Path, output: Path, _: str) -> None:
+            if (bundle / "result.json").exists():
+                shutil.copy(bundle / "result.json", output / "zz_result.json")
+
+        with tempfile.TemporaryDirectory() as raw:
+            xctestrun = Path(raw) / "runner.xctestrun"
+            xctestrun.write_text("")
+            artifacts = Path(raw) / "artifacts"
+            artifacts.mkdir()
+            with mock.patch.object(fast_device, "developer_dir_for", return_value="/Xcode"), \
+                    mock.patch.object(fast_device, "pick_signing", return_value={"name": "P", "bundle_id": "b"}), \
+                    mock.patch.object(fast_device, "build_runner", return_value=xctestrun), \
+                    mock.patch.object(fast_device, "run", side_effect=fake_run), \
+                    mock.patch.object(fast_device, "export_attachments", side_effect=fake_export):
+                report = fast_device.run_one_shot(dict(self.DEVICE), {"actions": []}, artifacts, False)
+        return report, calls["xcodebuild"]
+
+    def test_one_shot_runs_again_once_when_xctest_times_out_enabling_automation(self) -> None:
+        report, runs = self.one_shot(["timeout", "pass"])
+        self.assertEqual((report["status"], runs), ("pass", 2))
+        self.assertIn("automation mode", report["retried"])
+
+    def test_a_repeated_start_shows_on_the_result_line(self) -> None:
+        import fast_device
+        notes = fast_device.report_notes({"status": "pass", "retried": "XCTest: Timed out while enabling automation mode"})
+        self.assertEqual(notes, ' retried="XCTest: Timed out while enabling automation mode"')
+
+    def test_one_shot_reports_a_second_automation_timeout(self) -> None:
+        report, runs = self.one_shot(["timeout", "timeout"])
+        self.assertEqual((report["status"], report["step"], runs), ("fail", "runner", 2))
+        self.assertIn("Timed out while enabling automation mode", report["error"])
+
+    def test_one_shot_never_reruns_a_flow_that_failed(self) -> None:
+        report, runs = self.one_shot(["fail"])
+        self.assertEqual((report["status"], report["step"], runs), ("fail", 3, 1))
+        self.assertNotIn("retried", report)
 
 
 class VarsTests(unittest.TestCase):

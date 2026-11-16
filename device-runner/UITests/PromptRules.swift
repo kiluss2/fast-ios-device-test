@@ -20,4 +20,18 @@ enum PromptRules {
         }
         return nil
     }
+
+    // A prompt the app draws in its own window, not as an alert (StoreKit's "Enjoying …?"
+    // rating prompt): only a rule answers it, when its title text and its button are both on
+    // screen. A bare label never does, since the app's own screens carry "Not Now" and "OK" too.
+    static func screenChoice(texts: [String], buttons: [String], entries: [Any]) -> String? {
+        for case let rule as [String: Any] in entries {
+            guard let fragment = rule["title_contains"] as? String, let tap = rule["tap"] as? String,
+                  buttons.contains(tap),
+                  texts.contains(where: { $0.range(of: fragment, options: .caseInsensitive) != nil })
+            else { continue }
+            return tap
+        }
+        return nil
+    }
 }

@@ -42,6 +42,8 @@ PROFILE_DIRS = [
 ]
 TEST_TARGET = "FastDeviceUITests"
 TEST_ID = f"{TEST_TARGET}/FlowRunner/testFlow"
+# Runner start failures that leave the flow unrun and pass on a second start.
+TRANSIENT_RUNNER_ERRORS = ("Timed out while enabling automation mode",)
 
 
 class FastDeviceError(RuntimeError):
@@ -124,6 +126,17 @@ def pick_device(requested: str | None, devices: list[dict[str, Any]]) -> dict[st
         return connected[0]
     names = [f"{d['name']} ({d['udid']}, iOS {d['os']})" for d in connected]
     raise FastDeviceError(f"pass --device: {len(connected)} connected iPhones {names}")
+
+
+def wake_tunnel(device: dict[str, Any]) -> dict[str, Any]:
+    """The iPhone again after asking it for its lock state. CoreDevice closes an idle tunnel
+    (after a run, or once the runner idled out) and `devicectl list` then reports a reachable
+    iPhone as not connected; any request to the device opens the tunnel again."""
+    try:
+        run(["xcrun", "devicectl", "device", "info", "lockState", "--device", device["udid"]], check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        return device
+    return next((found for found in physical_devices() if found["udid"] == device["udid"]), device)
 
 
 def device_details(udid: str) -> dict[str, Any]:
@@ -456,8 +469,9 @@ def parse_prompt_labels(text: str) -> list[Any]:
 
 
 def report_notes(report: dict[str, Any]) -> str:
-    """What the runner did on its own: prompts it answered, and an idle wait it could not skip."""
-    notes = ""
+    """What the runner did on its own: a start it repeated, prompts it answered, and an idle wait
+    it could not skip."""
+    notes = f" retried={json.dumps(report['retried'], ensure_ascii=False)}" if report.get("retried") else ""
     if report.get("wait_for_idle") == "unsupported":
         notes += " wait_for_idle=unsupported"
     if report.get("dismissed"):
@@ -515,6 +529,20 @@ def publish_recording(artifacts: Path, passed: bool, session: str = "") -> Path 
 
 def install_app(udid: str, app_path: str) -> None:
     run(["xcrun", "devicectl", "device", "install", "app", "--device", udid, app_path])
+
+
+def uninstall_app(udid: str, bundle_id: str) -> None:
+    # Removing the app also removes its App Group container once no other app of the group is
+    # left, so the reinstall starts like a first launch; keychain items survive an uninstall.
+    run(["xcrun", "devicectl", "device", "uninstall", "app", "--device", udid, bundle_id], check=False)
+
+
+def bundle_id_of(app_path: Path) -> str:
+    try:
+        with (app_path / "Info.plist").open("rb") as handle:
+            return str(plistlib.load(handle)["CFBundleIdentifier"])
+    except (OSError, KeyError, plistlib.InvalidFileException) as error:
+        raise FastDeviceError(f"--fresh-install: no bundle id in {app_path} ({error}); set app.bundle_id in the flow") from error
 
 
 def iphone_app(derived_data: Path, configuration: str | None, bundle_id: str | None) -> Path:
@@ -841,6 +869,10 @@ def parse_flow_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("flow", type=Path)
     parser.add_argument("--device", help="UDID or name; required when several iPhones are connected")
     parser.add_argument("--install", help="Install this .app on the device before the run")
+    parser.add_argument(
+        "--fresh-install", action="store_true",
+        help="Remove the app (and its data) before --install puts the build back: a run from a first launch",
+    )
     parser.add_argument("--rebuild-runner", action="store_true", help="Rebuild and re-sign the cached runner")
     parser.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -894,9 +926,16 @@ def run_flow(args: argparse.Namespace) -> int:
     name = variant_name(spec.get("name") or flow_path.stem, args.appearance, args.content_size)
     device = resolve_device(args.device or app.get("device"))
     if not device["connected"]:
+        device = wake_tunnel(device)
+    if not device["connected"]:
         raise FastDeviceError(f"{device['name']} is not connected; unlock it and plug it in or join the same Wi-Fi")
-    if args.install or app.get("install_path"):
-        install_app(device["udid"], str(Path(args.install or app["install_path"]).expanduser()))
+    install_path = args.install or app.get("install_path")
+    if args.fresh_install:
+        if not install_path:
+            raise FastDeviceError("--fresh-install needs --install <.app> (or app.install_path): it reinstalls that build")
+        uninstall_app(device["udid"], app.get("bundle_id") or bundle_id_of(Path(install_path).expanduser()))
+    if install_path:
+        install_app(device["udid"], str(Path(install_path).expanduser()))
     # A flow starts or reuses the persistent runner (~5 s once, then 4–6 s a flow instead of
     # 14–20 s one-shot); the runner idles out after FAST_DEVICE_IDLE (5 min). A recording needs
     # a one-shot run.
@@ -979,23 +1018,35 @@ def run_one_shot(
     if record:
         enable_recording(run_xctestrun)
     result_bundle = artifacts / "result.xcresult"
-    test = run(
-        [
-            "xcodebuild", "test-without-building", "-xctestrun", str(run_xctestrun),
-            "-destination", f"id={device['udid']}", f"-only-testing:{TEST_ID}",
-            "-resultBundlePath", str(result_bundle),
-        ],
-        env={**os.environ, "DEVELOPER_DIR": developer_dir}, check=False,
-    )
+    retried = ""
+    for attempt in range(2):
+        shutil.rmtree(result_bundle, ignore_errors=True)
+        test = run(
+            [
+                "xcodebuild", "test-without-building", "-xctestrun", str(run_xctestrun),
+                "-destination", f"id={device['udid']}", f"-only-testing:{TEST_ID}",
+                "-resultBundlePath", str(result_bundle),
+            ],
+            env={**os.environ, "DEVELOPER_DIR": developer_dir}, check=False,
+        )
+        output = test.stdout + test.stderr
+        (artifacts / "xcodebuild.log").write_text(output)
+        export_attachments(result_bundle, artifacts, developer_dir)
+        result_file = next(artifacts.glob("zz_result.*"), None)
+        # XCTest on an iPhone now and then never gets automation mode on; nothing of the flow
+        # ran yet, so one more start is safe and usually works.
+        transient = next((marker for marker in TRANSIENT_RUNNER_ERRORS if marker in output), None)
+        if result_file or not transient or attempt:
+            break
+        retried = f"XCTest: {transient}"
     run_xctestrun.unlink(missing_ok=True)
-    (artifacts / "xcodebuild.log").write_text(test.stdout + test.stderr)
-    export_attachments(result_bundle, artifacts, developer_dir)
-    result_file = next(artifacts.glob("zz_result.*"), None)
     if result_file:
         report = json.loads(result_file.read_text())
     else:
-        errors = [line.strip() for line in (test.stdout + test.stderr).splitlines() if "error" in line.lower()][:4]
+        errors = [line.strip() for line in output.splitlines() if "error" in line.lower()][:4]
         report = {"status": "fail", "step": "runner", "error": " | ".join(errors) or "runner produced no result"}
+    if retried:
+        report["retried"] = retried
     report["signing"] = f"{signing['name']} ({signing['bundle_id']})"
     return report
 

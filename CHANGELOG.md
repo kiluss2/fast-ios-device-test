@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.19.0 — 2026-11-16
+
+- Evidence sheet: without `columns` it comes out landscape (about 16:10) for reviewers on desktop
+  screens: 7 phone shots take one row, 15 take two rows of 8. `SHEET` prints the columns chosen.
+- iPhone: a flow wakes an idle CoreDevice tunnel before refusing an iPhone as not connected.
+- iPhone: a one-shot run whose XCTest times out enabling automation mode starts once more by
+  itself (`retried=` on the result line).
+- iPhone: `--install <.app> --fresh-install` removes the app and its data first.
+- Prompts the app draws in its own tree (the App Store rating prompt on the iPhone) are answered
+  by a `title_contains` rule, on both engines; bare labels still answer only system prompts.
+- Docs: a seeded preference wins over the app's own write during that launch on the iPhone; get
+  a flow green unrecorded before `--record`; wait for a toast right after the step that shows it.
+- Evidence: the sheet and the clips are filed in `evidence/` of the ticket's Desktop folder, the
+  one folder the PR attaches whole; `source/` and `PR-description.md` stay beside it. Other
+  pictures the PR shows go into `evidence/` too, so none is missed at upload. A sheet spec that
+  already names its `out` keeps it, so folders filed before this release do not move.
+
 ## 1.18.0 — 2026-11-21
 
 ### Run artifacts no longer land inside the project

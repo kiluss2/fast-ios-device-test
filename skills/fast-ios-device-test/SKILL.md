@@ -13,7 +13,7 @@ description: Use when asked to run, verify, re-test, or record an iOS screen or 
 | Explore an unknown screen on a Simulator, read the app's console log | a subagent with Xcode 27's `device-interaction` skill (`DeviceInteraction*` MCP tools), on a **different** simulator; then write the flow here. It refuses a physical iPhone (Xcode 27.0 and 27.2) |
 | Explore or drive a physical iPhone: taps, pinch, rotate, `two_finger_drag` (a map's tilt) | this skill: `fastDeviceTest do '<action>'` step by step ([references/device.md](references/device.md)) |
 | Watch the videos of a `--record` session | `fastUIReview` — read [references/review.md](references/review.md) first |
-| PR evidence (sheet + clips) | nothing to run: every PASS flow run, and every `--before` run that failed at its outcome step, is filed in `~/Desktop/<project> <ticket>/` — "Evidence folder" in [references/usage.md](references/usage.md) |
+| PR evidence (sheet + clips) | nothing to run: every PASS flow run, and every `--before` run that failed at its outcome step, is filed in `~/Desktop/<project> <ticket>/evidence/` — "Evidence folder" in [references/usage.md](references/usage.md) |
 | Change that sheet (order, captions, a shot) | edit `source/sheet.json` there, then `fastEvidenceSheet <it>` — "Evidence sheet" in [references/usage.md](references/usage.md) |
 | Physical iPhone | read [references/device.md](references/device.md) first |
 
@@ -120,6 +120,8 @@ launch) and print one PASS/FAIL line with the visible labels after the actions.
   To let a screen settle, `wait` for the next screen's selector; `pause` only for a
   product-defined delay. `"settle": true` on a tap/swipe waits until the tree stops changing
   (max 2.5 s) — use it on screens that keep animating, not by default.
+- A toast or banner is gone in ~2 s: `wait` for it in the step right after the one that shows
+  it, with no `pause` or `assert_absent` between.
 - "Must not show" → `assert_absent` (`seconds` ≤ 8); "closes" → `wait_absent`. A successful
   tap proves nothing about absence.
 - Fresh install wipes the defaults domain, and the engine undoes what a run changed (seeded
@@ -157,7 +159,9 @@ A flow is evidence only when its last actions assert the product outcome. A FAIL
 show the expected screen under another label is a selector bug (fix the flow); labels showing
 the wrong state (popup still there, gate not applied) are a product bug: fix the code, rebuild
 (`--build-only`, or drop `--reuse-app`), rerun the same flow. Record (`--record`) when the user
-asks for video or a flow proves a fix: a PASS keeps one `final[-<session>].mp4` per task, a
+asks for video or a flow proves a fix, and only once the flow passes without it: a recorded run
+is one-shot (~20 s to start XCTest on an iPhone, against ~5 s on the persistent runner), so fix
+selectors and timing unrecorded first. A PASS keeps one `final[-<session>].mp4` per task, a
 FAIL keeps `run.mp4` beside `failure.png`. Both engines record — the iPhone through XCTest's own
 screen recording, one-shot runs only ([references/device.md](references/device.md)) — and both
 re-encode the clip at review quality (H.264, 960 px, ~1–2 MB for 20 s).

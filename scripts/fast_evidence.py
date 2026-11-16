@@ -9,8 +9,9 @@ that is not a screenshot, dump, motion or pause): a failure earlier than that is
 not the bug.
 
     <FAST_EVIDENCE_DIR, default ~/Desktop>/<project> <ticket>/
-      <sheet>.jpg                  captioned sheet of every filed shot (the ticket by default)
-      <case>.mp4, <case>-before.mp4
+      evidence/                    everything the PR attaches, and nothing else
+        <sheet>.jpg                captioned sheet of every filed shot (the ticket by default)
+        <case>.mp4, <case>-before.mp4
       source/sheet.json            fastEvidenceSheet spec; edit it and render again
       source/shots/<case>/<role>-<shot>.jpg   720 px wide, JPEG 80
 
@@ -38,6 +39,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SHOT_WIDTH = 720
 SHOT_QUALITY = 80
+# The PR attaches this folder whole, so it holds nothing else.
+EVIDENCE_DIR = "evidence"
 # Jira-style keys in upper case only: a lower-case `fix-crash-2` in a branch is not a ticket.
 TICKET_KEY = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]+-\d+(?!\d)")
 CAPTURE_ACTIONS = {"screenshot", "dump", "motion", "pause"}
@@ -163,6 +166,7 @@ def store_shot(source: Path, target: Path) -> None:
 
 
 def store_clip(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(f".{target.name}.partial")
     shutil.copyfile(source, partial)
     os.replace(partial, target)
@@ -234,13 +238,13 @@ def file_run(
             })
         filed_clip = None
         if clip:
-            filed_clip = folder / f"{case}{'-before' if before else ''}{clip.suffix or '.mp4'}"
+            filed_clip = folder / EVIDENCE_DIR / f"{case}{'-before' if before else ''}{clip.suffix or '.mp4'}"
             store_clip(clip, filed_clip)
         if cells:
             spec_path = folder / "source" / (f"sheet-{safe(sheet_name)}.json" if sheet_name else "sheet.json")
             sheet = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.exists() else {}
             sheet.setdefault("title", title)
-            sheet.setdefault("out", f"../{folder_safe(sheet_name or ticket)}.jpg")
+            sheet.setdefault("out", f"../{EVIDENCE_DIR}/{folder_safe(sheet_name or ticket)}.jpg")
             sheet.setdefault("cells", [])
             merge_cells(sheet["cells"], list(sheet.get("removed") or []), cells)
             spec_path.write_text(json.dumps(sheet, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

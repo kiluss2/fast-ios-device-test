@@ -154,8 +154,9 @@ class FilingTests(Base):
         self.assertIsNone(error)
         folder = self.desktop / "MyApp PRJ-12"
         self.assertEqual(filed["dir"], folder)
-        self.assertEqual(sorted(path.name for path in folder.iterdir()),
-                         ["PRJ-12.jpg", "gating-off-iPhone-17.mp4", "source"])
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["evidence", "source"])
+        self.assertEqual(sorted(path.name for path in (folder / "evidence").iterdir()),
+                         ["PRJ-12.jpg", "gating-off-iPhone-17.mp4"])
         shot = folder / "source/shots/gating-off-iPhone-17/after-main.jpg"
         with Image.open(shot) as image:
             self.assertEqual((image.width, image.format), (720, "JPEG"))
@@ -163,7 +164,7 @@ class FilingTests(Base):
         self.assertEqual([path.name for path in run.iterdir()], ["metrics.json"])
         self.assertFalse(video.exists())
         metrics = json.loads((run / "metrics.json").read_text())
-        self.assertEqual(metrics["video"], str(folder / "gating-off-iPhone-17.mp4"))
+        self.assertEqual(metrics["video"], str(folder / "evidence/gating-off-iPhone-17.mp4"))
         self.assertEqual(metrics["evidence"], str(folder))
         self.assertEqual(metrics["evidence_shots"], {"main": str(shot)})
 
@@ -176,7 +177,7 @@ class FilingTests(Base):
         self.assertEqual([(cell["label"], cell["caption"]) for cell in cells],
                          [("gating-off · iPhone 17", "no paywall on reopen")])
         result = sheet.build(spec)
-        self.assertEqual(Path(result["path"]), filed["dir"] / "PRJ-12.jpg")
+        self.assertEqual(Path(result["path"]), filed["dir"] / "evidence/PRJ-12.jpg")
 
     def test_a_rerun_keeps_edited_text_position_and_the_before_cell(self) -> None:
         root = repo(self.tmp)
@@ -204,7 +205,7 @@ class FilingTests(Base):
         self.assertEqual([cell["key"] for cell in cells], [
             "gating-prod-iPhone-17/after/main", "gating-off-iPhone-17/before/failure", "gating-off-iPhone-17/after/main"])
         self.assertEqual(cells[2]["caption"], "edited by the agent")
-        self.assertTrue((filed["dir"] / "gating-off-iPhone-17-before.mp4").exists())
+        self.assertTrue((filed["dir"] / "evidence/gating-off-iPhone-17-before.mp4").exists())
 
     def test_a_cell_the_agent_removed_is_not_added_back(self) -> None:
         root = repo(self.tmp)
@@ -229,8 +230,8 @@ class FilingTests(Base):
         run, video = make_run(root / "build/fast-ui/gating-off", "pass", shots=("main.png", "step-04.png"))
         filed, _ = self.file(root, run, video, flow=flow)
         folder = filed["dir"]
-        self.assertTrue((folder / "gating.jpg").exists())
-        self.assertTrue((folder / "G2.mp4").exists())
+        self.assertTrue((folder / "evidence/gating.jpg").exists())
+        self.assertTrue((folder / "evidence/G2.mp4").exists())
         cells = json.loads((folder / "source/sheet-gating.json").read_text())["cells"]
         self.assertEqual([(cell["key"], cell["label"], cell["caption"]) for cell in cells],
                          [("G2/after/step-04", "G2 · Off", "c")])
@@ -249,7 +250,7 @@ class FilingTests(Base):
         filed, _ = self.file(root, run, video, tidy=False)
         self.assertTrue((run / "main.png").exists())
         self.assertTrue(video.exists())
-        self.assertTrue((filed["dir"] / "PRJ-12.jpg").exists())
+        self.assertTrue((filed["dir"] / "evidence/PRJ-12.jpg").exists())
 
     def test_a_failure_that_is_not_a_before_stays_put(self) -> None:
         root = repo(self.tmp)
@@ -319,7 +320,7 @@ class EngineTests(Base):
         self.assertEqual(code, 0)
         folder = self.desktop / "MyApp PRJ-12"
         self.assertIn(f"evidence={folder.as_uri()}", out)
-        self.assertTrue((folder / "PRJ-12.jpg").exists())
+        self.assertTrue((folder / "evidence/PRJ-12.jpg").exists())
         self.assertEqual([path.name for path in run.iterdir()], ["metrics.json"])
 
     def test_a_simulator_before_run_files_its_failure_screen(self) -> None:

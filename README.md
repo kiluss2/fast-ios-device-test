@@ -16,7 +16,7 @@ guards let one request carry several steps. `fastUIMap` prints what earlier runs
 
 Every PASS flow run, and every `--before` run that failed at its outcome step, is filed as PR
 evidence in `~/Desktop/<project> <ticket>/` (the ticket from the git branch): one captioned
-sheet, the clips, and light per-shot JPEGs that `fastEvidenceSheet <spec.json>` renders again
+sheet and the clips in `evidence/`, the folder the PR attaches whole, and light per-shot JPEGs that `fastEvidenceSheet <spec.json>` renders again
 after an edit. A filed run keeps only its `metrics.json` under `build/`. Both engines record with `--record` (the iPhone through XCTest's own
 screen recording) and keep the clip at review quality (H.264, 960 px, ~1–2 MB for 20 s).
 

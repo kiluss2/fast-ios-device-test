@@ -44,6 +44,17 @@ struct RunnerLogicChecks {
               == "Allow", "bare labels answer in the order they are declared")
         check(PromptRules.choice(title: notifications, buttons: ["Don’t Allow", "Allow"], entries: [])
               == nil, "nothing declared taps nothing")
+
+        let rating = ["Enjoying App?", "Tap a star to rate it on the App Store.", "1 star unselected"]
+        let ratingRule: [Any] = [["title_contains": "Enjoying", "tap": "Not Now"]]
+        check(PromptRules.screenChoice(texts: rating, buttons: ["1 star unselected", "Not Now"], entries: ratingRule)
+              == "Not Now", "a rule answers a prompt drawn inside the app (StoreKit's rating prompt)")
+        check(PromptRules.screenChoice(texts: rating, buttons: ["Not Now"], entries: ["Not Now"])
+              == nil, "a bare label never taps a button of the app's own screen")
+        check(PromptRules.screenChoice(texts: ["Welcome"], buttons: ["Not Now"], entries: ratingRule)
+              == nil, "a rule whose title is not on screen taps nothing")
+        check(PromptRules.screenChoice(texts: rating, buttons: ["Submit"], entries: ratingRule)
+              == nil, "a rule whose button is missing taps nothing")
     }
 
     static func checkSettle() {
