@@ -131,6 +131,27 @@ def axe(udid: str, *args: str, check: bool = True) -> subprocess.CompletedProces
     return result
 
 
+# iOS 27.0 ignores AXe's default Home press (0 of 14 on an iPhone 17 Pro, 2026-11-23), and the
+# hold a press needs grows with the load on the Mac: 0.1 s landed on a quiet Mac and never on a
+# busy one, 0.15 s once in six, 0.2 s and 0.3 s every time (22 of 22, iOS 26.5 included).
+HOME_HOLD = 0.3
+SPRINGBOARD = "com.apple.springboard"
+
+
+def press_home(udid: str) -> None:
+    """A held Home press with SpringBoard launched beside it. Either one leaves the app, so a
+    press the Simulator drops no longer passes with the app still in front. The launch alone is
+    not enough (it missed 3 of 10 on iOS 26.5) and changes nothing when SpringBoard is already in
+    front (icon editing stays on); it ends before the press does, so it costs no time."""
+    launch = threading.Thread(
+        target=command, args=(["xcrun", "simctl", "launch", udid, SPRINGBOARD],), kwargs={"check": False}, daemon=True)
+    launch.start()
+    try:
+        axe(udid, "button", "home", "--duration", str(HOME_HOLD))
+    finally:
+        launch.join(timeout=5)
+
+
 def file_link(path: Path | str) -> str:
     """Absolute `file://` URL: terminals open it on click, a bare or relative path they do not."""
     return Path(path).expanduser().resolve().as_uri()
@@ -2070,10 +2091,12 @@ def run_action(
             raise FastUIError(f"action {index}: AXe has no volume buttons on the Simulator; use an iPhone")
         if button not in ("home", "lock", "siri"):
             raise FastUIError(f"action {index}: button must be home, lock, siri, volume_up or volume_down, not {button!r}")
-        # AXe's default press locks the screen but is too short to wake it again, and Siri
-        # answers only a held press.
-        hold = {"lock": "0.3", "siri": "1.5"}.get(button)
-        axe(udid, "button", button, *(["--duration", hold] if hold else []))
+        if button == "home":
+            press_home(udid)
+        else:
+            # AXe's default press locks the screen but is too short to wake it again, and Siri
+            # answers only a held press.
+            axe(udid, "button", button, "--duration", {"lock": "0.3", "siri": "1.5"}[button])
         invalidate_hierarchy(udid)
     elif kind == "set_slider":
         target = [("--id", action["id"])] if "id" in action else [("--label", action["label"])] if "label" in action else []

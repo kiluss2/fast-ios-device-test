@@ -146,6 +146,11 @@ Supported actions:
   the lock screen's swipe up (`bottom`) work; Notification Center never opens; go home with
   `press_button` `home`, since a `bottom` swipe with the keyboard up stays in the app and on the
   Home Screen it can start icon editing.
+- `press_button` `home` on the Simulator holds the press 0.3 s and launches SpringBoard beside
+  it (about 0.6 s in all). iOS 27.0 ignores AXe's default press, and a busy Mac needs a longer
+  hold: 0.1 s landed on a quiet Mac and never on a busy one, 0.15 s once in six, 0.2 s and 0.3 s
+  every time (2026-11-23, iPhone 17 Pro, iOS 27.0 and 26.5, AXe 1.8.0). Launching SpringBoard
+  alone is quicker (0.2–0.4 s) but missed 3 of 10 on iOS 26.5; in icon editing it changes nothing.
 - `press_button`: `home` (it does not close an open Control Center; `edge_swipe` `bottom` does;
   on the iPhone the next steps act on SpringBoard until an action names another `app`);
   `siri` (on the iPhone with the request as `text`, which the screen map never keeps);
@@ -646,6 +651,27 @@ launch or preferences) and prints `PASS <type>|actions=N [screenshot=…] [ui=�
 - `FAST_SIMULATOR` / `FAST_UI_APP` are the defaults for `--simulator` / `--app`, `FAST_DEVICE` for
   `--device` on every `fastDeviceTest` command. `--app` also names the bundle id the screen map
   records the steps under.
+
+## Home Screen widgets (Simulator)
+
+Measured on iOS 27.0, iPhone 17 Pro (2026-11-23), with `do --app com.apple.springboard`; the
+coordinates are points on that 402 × 874 screen.
+
+- Edit mode: `long_press` 1.5 s on an empty part of the page; on a page full of widgets, the empty
+  part of the Dock (`x` 60, `y` 805). The status bar does not start it.
+- Gallery: `tap_label` `Edit` (`expect` `Add Widget`), `tap_label` `Add Widget`, `tap_label`
+  `Search Widgets` (`optional`), `type_text` the app's name, then `tap_point` the result row
+  (135, 255): its label is also the app icon's on the page behind.
+- The picker's blue button is labelled ` Add Widget`, with a leading space: `{"type":
+  "tap_label", "label_contains": "Add Widget", "element_type": "Button"}`.
+- The app's next widget: `{"type": "drag", "from": [330, 500], "to": [40, 500], "hold": 0,
+  "duration": 0.25}`, then `wait` for its display name. A `swipe`, or a drag that rests first,
+  picks the preview up instead of turning the page.
+- Appearance: `Edit` → `Customize`, then `tap_label` `Default`, `Dark`, `Clear` or `Tinted`; close
+  the panel with a `tap_point` above it (200, 60). Leave edit mode with `tap_label` `Done`
+  (`optional`).
+- Add one widget per request and read its PASS line before the next one: a wrong selector inside
+  a shell loop fails once per widget.
 
 ## Screen map (`fastUIMap`)
 

@@ -438,7 +438,10 @@ class ActionTests(unittest.TestCase):
         self.run_gesture({"type": "press_key", "key": "return"}).assert_called_once_with("SIM", "key-sequence", "--keycodes", "40")
         with self.assertRaisesRegex(fast_ui.FastUIError, "key must be one of"):
             self.run_gesture({"type": "press_key", "key": "f13"})
-        self.run_gesture({"type": "press_button", "button": "home"}).assert_called_once_with("SIM", "button", "home")
+        # iOS 27 ignores AXe's default Home press: it is held, and SpringBoard is launched beside it.
+        home = self.run_gesture({"type": "press_button", "button": "home"})
+        home.assert_called_once_with("SIM", "button", "home", "--duration", "0.3")
+        home.command.assert_called_once_with(["xcrun", "simctl", "launch", "SIM", "com.apple.springboard"], check=False)
         # AXe's default press locks the screen but is too short to wake it again.
         self.run_gesture({"type": "press_button", "button": "lock"}).assert_called_once_with(
             "SIM", "button", "lock", "--duration", "0.3")

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.19.1 — 2026-11-23
+
+- Simulator: `press_button` `home` holds the press 0.3 s and launches SpringBoard beside it. On
+  iOS 27.0 AXe's default press printed PASS with the app still in front.
+- Docs: adding Home Screen widgets and switching the Home Screen appearance on an iOS 27 Simulator.
+
 ## 1.19.0 — 2026-11-16
 
 - Evidence sheet: without `columns` it comes out landscape (about 16:10) for reviewers on desktop
