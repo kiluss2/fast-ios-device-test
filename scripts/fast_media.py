@@ -26,15 +26,53 @@ HELPER_CACHE = Path.home() / "Library/Caches/fast-ios-device-test"
 REVIEW_LONG_SIDE = int(os.environ.get("FAST_VIDEO_LONG_SIDE", "960"))
 REVIEW_KBPS = int(os.environ.get("FAST_VIDEO_KBPS", "800"))
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v"}
+# Kept before a clip's start so its first frame is the settled screen, not the next gesture.
+CLIP_LEAD = 0.3
+
+
+class ClipStart:
+    """Where a recorded clip begins, on the recorder's clock (the device runner's ClipStart.swift
+    is the iPhone twin). The relaunch at a flow's head is setup, not evidence: by default the clip
+    starts once the leading launch / activate / terminate steps are done; a step marked
+    `"clip_start": true` moves it to just before that step; `setup.clip: "full"` keeps it all."""
+
+    OPENING_KINDS = {"launch", "activate", "terminate"}
+
+    def __init__(self, setup: dict) -> None:
+        self.full = setup.get("clip") == "full"
+        self.time = 0.0
+        self.leading = True
+        self.marked = False
+
+    def opened(self, now: float) -> None:
+        self.time = now
+
+    def before(self, action: dict, now: float) -> None:
+        if action.get("clip_start") is True and not self.marked:
+            self.time = now
+            self.marked = True
+
+    def after(self, action: dict, now: float) -> None:
+        if not self.leading or self.marked:
+            return
+        if action.get("type") in self.OPENING_KINDS:
+            self.time = now
+        else:
+            self.leading = False
+
+    def offset(self) -> float:
+        return 0.0 if self.full else max(0.0, self.time - CLIP_LEAD)
 
 SHRINK_SOURCE = '''
 import AVFoundation
-// shrink <in> <out> <longSide> <kbps>: H.264 MP4, aspect kept, never upscaled, no audio.
+// shrink <in> <out> <longSide> <kbps> [startSeconds]: H.264 MP4, aspect kept, never upscaled,
+// no audio; a start drops everything before it.
 let args = CommandLine.arguments
-guard args.count == 5, let longSide = Double(args[3]), let kbps = Int(args[4]) else {
-    FileHandle.standardError.write("usage: shrink <in> <out> <longSide> <kbps>\\n".data(using: .utf8)!)
+guard args.count == 5 || args.count == 6, let longSide = Double(args[3]), let kbps = Int(args[4]) else {
+    FileHandle.standardError.write("usage: shrink <in> <out> <longSide> <kbps> [startSeconds]\\n".data(using: .utf8)!)
     exit(2)
 }
+let start = args.count == 6 ? max(0, Double(args[5]) ?? 0) : 0
 let source = AVURLAsset(url: URL(fileURLWithPath: args[1]))
 let target = URL(fileURLWithPath: args[2])
 try? FileManager.default.removeItem(at: target)
@@ -53,6 +91,9 @@ do {
     ])
     output.alwaysCopiesSampleData = false
     reader.add(output)
+    if start > 0, start < CMTimeGetSeconds(source.duration) {
+        reader.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600), end: source.duration)
+    }
     let writer = try AVAssetWriter(outputURL: target, fileType: .mp4)
     let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
         AVVideoCodecKey: AVVideoCodecType.h264,
@@ -115,8 +156,12 @@ def helper_command(source: str, cache_dir: Path = HELPER_CACHE, name: str = "fra
     return ["swift", str(script)]
 
 
-def shrink_video(source: Path, target: Path | None = None, long_side: int = REVIEW_LONG_SIDE, kbps: int = REVIEW_KBPS) -> Path:
-    """Move `source` to `target` (default: in place) re-encoded at review quality.
+def shrink_video(
+    source: Path, target: Path | None = None, long_side: int = REVIEW_LONG_SIDE, kbps: int = REVIEW_KBPS,
+    start: float = 0.0,
+) -> Path:
+    """Move `source` to `target` (default: in place) re-encoded at review quality, from
+    `start` seconds on (where `ClipStart` puts the clip, past the opening relaunch).
 
     The re-encode only replaces the original when it succeeded and came out smaller; any
     failure keeps the original recording under the target name, so evidence is never lost.
@@ -129,7 +174,10 @@ def shrink_video(source: Path, target: Path | None = None, long_side: int = REVI
     if not keep_original:
         try:
             completed = subprocess.run(
-                [*helper_command(SHRINK_SOURCE, name="shrink"), str(source), str(encoded), str(long_side), str(kbps)],
+                [
+                    *helper_command(SHRINK_SOURCE, name="shrink"), str(source), str(encoded), str(long_side), str(kbps),
+                    *([f"{start:.3f}"] if start > 0 else []),
+                ],
                 check=False, capture_output=True, text=True, timeout=600,
             )
             keep_original = (

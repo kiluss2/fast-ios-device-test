@@ -67,6 +67,11 @@ print(writer.status == .completed ? "ok" : "failed")
 '''
 
 # Prints "<width>x<height> <codec>" of a clip's video track.
+CLIP_DURATION = '''
+import AVFoundation
+print(CMTimeGetSeconds(AVURLAsset(url: URL(fileURLWithPath: CommandLine.arguments[1])).duration))
+'''
+
 CLIP_INFO = '''
 import AVFoundation
 let track = AVURLAsset(url: URL(fileURLWithPath: CommandLine.arguments[1])).tracks(withMediaType: .video)[0]
@@ -160,7 +165,60 @@ class ShrinkVideoEncodeTests(unittest.TestCase):
             self.assertEqual(described.stdout.strip(), "442x960 avc1", described.stderr)
 
 
+@unittest.skipUnless(shutil.which("swiftc"), "needs swiftc and AVFoundation")
+class ShrinkVideoTrimTests(unittest.TestCase):
+    def test_a_start_drops_the_head_of_the_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            clip = Path(raw) / "Screen Recording.mp4"
+            make = fast_media.helper_command(MAKE_CLIP, name="test-clip")
+            made = subprocess.run([*make, str(clip), "1290", "2796", "72"], capture_output=True, text=True, timeout=600)
+            self.assertEqual(made.stdout.strip(), "ok", made.stderr)
+            kept = fast_media.shrink_video(clip, Path(raw) / "run.mp4", start=2.0)
+            duration = fast_media.helper_command(CLIP_DURATION, name="test-duration")
+            seconds = subprocess.run([*duration, str(kept)], capture_output=True, text=True, timeout=120).stdout
+            self.assertAlmostEqual(float(seconds), 1.0, delta=0.15)
+
+
+class ClipStartTests(unittest.TestCase):
+    def test_the_clip_starts_after_the_leading_relaunch(self) -> None:
+        clip = fast_media.ClipStart({})
+        clip.opened(2.0)
+        for action, before, after in (({"type": "launch"}, 2.1, 6.0), ({"type": "wait"}, 6.0, 8.0), ({"type": "launch"}, 9, 12)):
+            clip.before(action, before)
+            clip.after(action, after)
+        self.assertAlmostEqual(clip.offset(), 6.0 - fast_media.CLIP_LEAD)
+
+    def test_a_marked_step_moves_the_start_to_just_before_it(self) -> None:
+        clip = fast_media.ClipStart({})
+        clip.opened(2.0)
+        for action, before, after in (({"type": "wait"}, 2.0, 5.0), ({"type": "tap_label", "clip_start": True}, 5.5, 6.0)):
+            clip.before(action, before)
+            clip.after(action, after)
+        self.assertAlmostEqual(clip.offset(), 5.5 - fast_media.CLIP_LEAD)
+
+    def test_setup_clip_full_keeps_the_whole_recording(self) -> None:
+        clip = fast_media.ClipStart({"clip": "full"})
+        clip.opened(4.0)
+        self.assertEqual(clip.offset(), 0.0)
+
+    def test_shift_step_labels_moves_step_times_onto_the_trimmed_clip(self) -> None:
+        import fast_ui
+        shifted = fast_ui.shift_step_labels([{"step": "01_wait", "at": 7.5, "labels": []}, {"step": "x"}], 5.0)
+        self.assertEqual(shifted, [{"step": "01_wait", "at": 2.5, "labels": []}, {"step": "x"}])
+
+
 class DeviceRecordingTests(unittest.TestCase):
+    def test_recording_offset_reads_the_recording_start_from_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = Path(raw)
+            (run / "manifest.json").write_text(json.dumps([{"attachments": [
+                {"suggestedHumanReadableName": "Screen Recording 2026-11-25 at 04.35.23 PM.mp4", "timestamp": 1000.0},
+                {"suggestedHumanReadableName": "UI Snapshot", "timestamp": 1002.0},
+            ]}]))
+            self.assertAlmostEqual(fast_device.recording_offset(run, {"clip_start": 1005.5}), 5.5 - fast_media.CLIP_LEAD)
+            self.assertEqual(fast_device.recording_offset(run, {}), 0.0)
+            self.assertEqual(fast_device.recording_offset(run, {"clip_start": 999.0}), 0.0)
+
     def test_enable_recording_keeps_the_recording_of_a_passing_test(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             xctestrun = Path(raw) / "run.xctestrun"
@@ -174,7 +232,7 @@ class DeviceRecordingTests(unittest.TestCase):
 
     def test_publish_recording_names_the_passing_clip_final(self) -> None:
         with tempfile.TemporaryDirectory() as raw, \
-                mock.patch.object(fast_device, "shrink_video", side_effect=lambda s, t=None: Path(shutil.move(str(s), t or s))):
+                mock.patch.object(fast_device, "shrink_video", side_effect=lambda s, t=None, **_: Path(shutil.move(str(s), t or s))):
             run = Path(raw) / "task" / "20261013-110324-00008120"
             run.mkdir(parents=True)
             (run / "Screen Recording 2026-10-13 at 11.03.mp4").write_bytes(b"v" * 10)
@@ -187,7 +245,7 @@ class DeviceRecordingTests(unittest.TestCase):
 
     def test_publish_recording_keeps_a_failing_clip_as_run_mp4(self) -> None:
         with tempfile.TemporaryDirectory() as raw, \
-                mock.patch.object(fast_device, "shrink_video", side_effect=lambda s, t=None: Path(shutil.move(str(s), t or s))):
+                mock.patch.object(fast_device, "shrink_video", side_effect=lambda s, t=None, **_: Path(shutil.move(str(s), t or s))):
             run = Path(raw) / "task" / "20261013-110324-00008120"
             run.mkdir(parents=True)
             (run / "Screen Recording.mp4").write_bytes(b"v" * 10)

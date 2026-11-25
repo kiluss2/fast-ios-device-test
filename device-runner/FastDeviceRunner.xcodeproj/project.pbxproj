@@ -15,6 +15,7 @@
 		5DC12CF5DB426166C4AB98FF /* Quiescence.swift in Sources */ = {isa = PBXBuildFile; fileRef = F21D79583A6E45149420453D /* Quiescence.swift */; };
 		A7E157FDCB076B8CFC21E10C /* Gestures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2C6C48F9FC1E7D07FCC76FC /* Gestures.swift */; };
 		D0E977F76877FF6F052F969D /* Trail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12A0F7544D460CEB48C710A5 /* Trail.swift */; };
+		D79FE17BAE46C33A8FE5ED1E /* ClipStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = B403D077C004B1EE57302CA9 /* ClipStart.swift */; };
 		EEAF213EA65D1CECD99CB900 /* RequestServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44D76808729E0532787CD5E5 /* RequestServer.swift */; };
 /* End PBXBuildFile section */
 
@@ -25,6 +26,7 @@
 		18917F90F8AC5426411A45DD /* DirectTouch.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DirectTouch.m; sourceTree = "<group>"; };
 		44D76808729E0532787CD5E5 /* RequestServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestServer.swift; sourceTree = "<group>"; };
 		9046CAECC30BA5BCF9304A30 /* Settle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settle.swift; sourceTree = "<group>"; };
+		B403D077C004B1EE57302CA9 /* ClipStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipStart.swift; sourceTree = "<group>"; };
 		CC84113BD999F7D6FECEC845 /* DirectTouch.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DirectTouch.h; sourceTree = "<group>"; };
 		D63E79C1198B8D08F6671256 /* Requests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Requests.swift; sourceTree = "<group>"; };
 		EA8ECD181464F151DF4C200B /* FastDeviceUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FastDeviceUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -53,6 +55,7 @@
 		85E8D0BB77B2BE257952423A /* UITests */ = {
 			isa = PBXGroup;
 			children = (
+				B403D077C004B1EE57302CA9 /* ClipStart.swift */,
 				CC84113BD999F7D6FECEC845 /* DirectTouch.h */,
 				18917F90F8AC5426411A45DD /* DirectTouch.m */,
 				EAA1DA5D6BC0BF1317FD2F62 /* FastDeviceUITests-Bridging-Header.h */,
@@ -123,6 +126,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D79FE17BAE46C33A8FE5ED1E /* ClipStart.swift in Sources */,
 				254EC07B9D26D42EEF90B729 /* DirectTouch.m in Sources */,
 				366E46B3E2CB8C8258F6A078 /* FlowRunner.swift in Sources */,
 				A7E157FDCB076B8CFC21E10C /* Gestures.swift in Sources */,

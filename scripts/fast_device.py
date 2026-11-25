@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 # bin/ holds symlinks in a git checkout but copies in the zip, so look beside scripts/ too.
 sys.path[:0] = [str(HERE), str(HERE.parent / "scripts")]
 from fast_media import (  # noqa: E402
-    VIDEO_SUFFIXES, clean_main, default_artifacts_root, mkdir_retry, prepare_artifacts_root, publish_video,
+    CLIP_LEAD, VIDEO_SUFFIXES, clean_main, default_artifacts_root, mkdir_retry, prepare_artifacts_root, publish_video,
     ready_do_folder, shrink_video,
 )
 import fast_evidence  # noqa: E402
@@ -512,9 +512,27 @@ def enable_recording(xctestrun: Path) -> None:
         run(["plutil", "-replace", f"{TEST_TARGET}.{key}", "-string", value, str(xctestrun)])
 
 
-def publish_recording(artifacts: Path, passed: bool, session: str = "") -> Path | None:
-    """XCTest's screen recording of the run at review quality: a PASS keeps it as
-    <task>/final[-<session>].mp4, a FAIL as run.mp4 beside its other artifacts."""
+def recording_offset(artifacts: Path, report: dict[str, Any]) -> float:
+    """Seconds of XCTest's recording before the flow's clip start (the runner's `clip_start`,
+    device time, the clock the recording attachment is stamped with); 0 when either is missing."""
+    manifest = artifacts / "manifest.json"
+    clip_start = report.get("clip_start")
+    if not isinstance(clip_start, (int, float)) or not manifest.exists():
+        return 0.0
+    starts = [
+        attachment.get("timestamp")
+        for test in json.loads(manifest.read_text())
+        for attachment in test.get("attachments", [])
+        if str(attachment.get("suggestedHumanReadableName", "")).startswith("Screen Recording")
+    ]
+    if len(starts) != 1 or not isinstance(starts[0], (int, float)):
+        return 0.0
+    return max(0.0, clip_start - starts[0] - CLIP_LEAD)
+
+
+def publish_recording(artifacts: Path, passed: bool, session: str = "", start: float = 0.0) -> Path | None:
+    """XCTest's screen recording of the run at review quality, from `start` seconds on: a PASS
+    keeps it as <task>/final[-<session>].mp4, a FAIL as run.mp4 beside its other artifacts."""
     recordings = sorted(
         (path for path in artifacts.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES),
         key=lambda path: path.stat().st_size, reverse=True,
@@ -524,7 +542,7 @@ def publish_recording(artifacts: Path, passed: bool, session: str = "") -> Path 
     primary, *others = recordings
     for other in others:
         shrink_video(other, other.with_suffix(".mp4"))
-    return publish_video(artifacts.parent, shrink_video(primary, artifacts / "run.mp4"), passed, session)
+    return publish_video(artifacts.parent, shrink_video(primary, artifacts / "run.mp4", start=start), passed, session)
 
 
 def install_app(udid: str, app_path: str) -> None:
@@ -964,7 +982,10 @@ def run_flow(args: argparse.Namespace) -> int:
         report = run_one_shot(device, prepared, artifacts, args.rebuild_runner, args.record)
     save_trail(report)
     save_dumps(report.get("results", []), artifacts)
-    video = publish_recording(artifacts, report["status"] == "pass", args.session)
+    clip_offset = recording_offset(artifacts, report) if args.record else 0.0
+    if clip_offset:
+        report["video_from_seconds"] = round(clip_offset, 2)
+    video = publish_recording(artifacts, report["status"] == "pass", args.session, clip_offset)
 
     report.update({
         "task": name, "device": device["name"], "udid": device["udid"], "ios": device["os"], "mode": mode,

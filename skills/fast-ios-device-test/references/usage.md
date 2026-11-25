@@ -317,6 +317,13 @@ interrupted; see "One run per simulator"), and names the task `<flow>@dark@xxl` 
 row. An app that forces its own theme from stored settings needs that setting
 seeded in `preferences` as well.
 
+The clip starts where the evidence does: the relaunch at a flow's head is cut, so it
+begins once the setup launch and any leading `launch` / `activate` / `terminate` steps are
+done (minus 0.3 s). Mark a later step `"clip_start": true` to start just before it (the first
+tap that matters, past a splash or loading screen); `"setup": {"clip": "full"}` keeps the whole
+recording, for a flow whose evidence is the launch itself. `metrics.json` names the cut in
+`video_from_seconds`.
+
 With `--record`, every step also stores the visible labels in `metrics.json`
 (`step_labels`, with the second it ended in the video); `fastUIReview` prints
 them per SHEET and copies them into the review notes.

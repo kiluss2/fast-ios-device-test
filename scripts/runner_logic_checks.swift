@@ -1,7 +1,7 @@
 import Foundation
 
 // Checks for the device runner's pure logic (PromptRules.swift, Settle.swift, Trail.swift,
-// Gestures.swift, Requests.swift). The
+// Gestures.swift, Requests.swift, ClipStart.swift). The
 // runner itself only runs on an iPhone, so test_fast_ui.RunnerLogicTests compiles these files
 // with this one for the Mac and runs the result.
 @main
@@ -19,6 +19,7 @@ struct RunnerLogicChecks {
         checkPromptRules()
         checkSettle()
         checkTrail()
+        checkClipStart()
         checkGestures()
         checkRequests()
         if failures > 0 { exit(1) }
@@ -87,6 +88,26 @@ struct RunnerLogicChecks {
             let nodes = screen?["nodes"] as? [[String: Any]] ?? []
             return nodes.compactMap { $0["label"] as? String }.joined(separator: "+")
         }
+    }
+
+    static func checkClipStart() {
+        var clip = ClipStart()
+        check(clip.report([:]).isEmpty, "clip: nothing before the app opened")
+        clip.opened()
+        let opened = clip.report([:])["clip_start"] as? Double ?? 0
+        Thread.sleep(forTimeInterval: 0.02)
+        clip.before(["type": "launch"])
+        clip.after(["type": "launch"])
+        let relaunched = clip.report([:])["clip_start"] as? Double ?? 0
+        check(relaunched > opened, "clip: a leading relaunch moves the start")
+        clip.before(["type": "wait"])
+        clip.after(["type": "wait"])
+        clip.after(["type": "launch"])
+        check(clip.report([:])["clip_start"] as? Double == relaunched, "clip: a launch after other steps is evidence")
+        Thread.sleep(forTimeInterval: 0.02)
+        clip.before(["type": "tap_label", "clip_start": true])
+        check((clip.report([:])["clip_start"] as? Double ?? 0) > relaunched, "clip: a marked step moves the start")
+        check(clip.report(["clip": "full"]).isEmpty, "clip: setup.clip full keeps the whole recording")
     }
 
     static func checkTrail() {

@@ -190,6 +190,7 @@ private extension FlowRunner {
 
     func runFlow(_ flow: [String: Any]) -> [String: Any] {
         var results: [[String: Any]] = []
+        var clip = ClipStart()
         var step = "launch"
         let setup = flow["setup"] as? [String: Any] ?? [:]
         if let touch = setup["touch"] as? String { xcuitestTaps = touch == "xcuitest" }
@@ -220,21 +221,27 @@ private extension FlowRunner {
                 target.activate()
             }
             awaitForeground(target)
+            clip.opened()
 
             let actions = flow["actions"] as? [[String: Any]] ?? []
             for (offset, action) in actions.enumerated() {
                 let index = offset + 1
                 step = String(format: "%02d_%@", index, action["type"] as? String ?? "unknown")
+                clip.before(action)
                 if let result = try execute(action, index: index) {
                     results.append(["step": index].merging(result) { first, _ in first })
                 }
+                clip.after(action)
             }
-            return ["status": "pass", "results": results, "labels": lastLabels].merging(idleNote) { first, _ in first }
+            return ["status": "pass", "results": results, "labels": lastLabels]
+                .merging(idleNote) { first, _ in first }
+                .merging(clip.report(setup)) { first, _ in first }
         } catch {
             capture("failure")
             if let current { attachText("failure-ui.txt", current.debugDescription) }
             return ["status": "fail", "step": step, "error": message(error), "results": results, "labels": lastLabels]
                 .merging(idleNote) { first, _ in first }
+                .merging(clip.report(setup)) { first, _ in first }
         }
     }
 }

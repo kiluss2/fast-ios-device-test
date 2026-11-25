@@ -26,8 +26,8 @@ from typing import Any, Callable, Iterator
 # bin/ holds symlinks in a git checkout but copies in the zip, so look beside scripts/ too.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent.parent / "scripts")]
 from fast_media import (  # noqa: E402
-    clean_main, default_artifacts_root, mkdir_retry, prepare_artifacts_root, prune_artifacts, publish_video,
-    ready_do_folder, shrink_video,
+    ClipStart, clean_main, default_artifacts_root, mkdir_retry, prepare_artifacts_root, prune_artifacts,
+    publish_video, ready_do_folder, shrink_video,
 )
 import fast_evidence  # noqa: E402
 from fast_guard import check_actions, parse_prompt_labels, risky_step  # noqa: E402
@@ -945,6 +945,11 @@ def step_labels(udid: str, step: str, at: float, result: dict[str, Any] | None) 
     return {"step": step, "at": round(at, 2), "labels": labels}
 
 
+def shift_step_labels(entries: list[dict[str, Any]], offset: float) -> list[dict[str, Any]]:
+    """Step times on the trimmed clip's clock: the cut drops `offset` seconds from its head."""
+    return [{**entry, "at": round(max(entry["at"] - offset, 0.0), 2)} if "at" in entry else entry for entry in entries]
+
+
 def stop_stale_recorder(udid: str) -> None:
     # A recorder left behind by an aborted run keeps the device locked and
     # makes the next start write a 0-byte file.
@@ -1157,9 +1162,19 @@ class Recorder:
                 "xcrun", "simctl", "io", self.udid, "recordVideo",
                 "--codec", "hevc", "--force", str(self.path),
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
+        threading.Thread(target=self._watch, args=(self.process,), daemon=True).start()
         time.sleep(1.5)
+
+    def _watch(self, process: subprocess.Popen[str]) -> None:
+        # The video's first frame comes when simctl says so, not when it was spawned: timing
+        # steps from that line keeps step times and the clip's cut on the video's own clock.
+        if process.stderr is None:
+            return
+        for line in process.stderr:
+            if "Recording started" in line:
+                self.started = time.perf_counter()
 
     def stop(self) -> None:
         if self.process is None:
@@ -2545,6 +2560,7 @@ def main() -> int:
     recorder = Recorder(udid, artifacts / "run.mp4") if args.record else None
     video: Path | None = None
     labels_per_step: list[dict[str, Any]] = []
+    clip = ClipStart(setup)
     previous_ui: dict[str, str] = {}
     saved_prefs: dict[str, str] = {}
     flow_vars = flow_variables(spec, base, udid, bundle_id)
@@ -2606,11 +2622,15 @@ def main() -> int:
             if TRAIL is not None:
                 TRAIL.gesture({"type": "launch"})
             command(launch)
+            if recorder:
+                clip.opened(recorder.elapsed())
 
         optional_prompt_labels = setup.get("optional_permission_labels", [])
         defaults = {"settle": True} if setup.get("settle_after_actions") else {}
         for index, action in enumerate(required(spec, "actions", "flow"), start=1):
             current_step = f"{index:02d}_{action.get('type', 'unknown')}"
+            if recorder:
+                clip.before(action, recorder.elapsed())
             with metrics.measure(current_step):
                 result = run_step(action, index, flow_vars, lambda expanded: execute_action(
                     expanded, udid, artifacts, index, optional_prompt_labels, defaults, bundle_id
@@ -2619,21 +2639,25 @@ def main() -> int:
                 # A SIGKILL skips the `finally`: the next run on this simulator runs these from the journal.
                 lease.touch("undo", list(flow_vars.undo))
             if recorder:
+                clip.after(action, recorder.elapsed())
                 labels_per_step.append(step_labels(udid, current_step, recorder.elapsed(), result))
             if result:
                 results.append({"step": index, **result})
 
         if recorder:
             recorder.stop()
-            video = publish_video(artifacts.parent, shrink_video(recorder.path), passed=True, session=args.session)
+            video = publish_video(
+                artifacts.parent, shrink_video(recorder.path, start=clip.offset()), passed=True, session=args.session
+            )
         payload = {
             "status": "pass", "task": name, "simulator": udid, "session": args.session,
             **({"expect": spec["expect"]} if spec.get("expect") else {}),
             **({"variant": variant} if variant else {}),
             "built": built, "total_seconds": metrics.total,
             "steps_seconds": metrics.steps, "results": results, "artifacts": str(artifacts),
-            **({"step_labels": labels_per_step} if recorder else {}),
+            **({"step_labels": shift_step_labels(labels_per_step, clip.offset())} if recorder else {}),
             **({"video": str(video)} if video else {}),
+            **({"video_from_seconds": round(clip.offset(), 2)} if video and clip.offset() else {}),
         }
         (artifacts / "metrics.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         payload, video, evidence_suffix = file_evidence(payload, video)
@@ -2676,7 +2700,9 @@ def main() -> int:
         if recorder:
             try:
                 recorder.stop()
-                video = publish_video(artifacts.parent, shrink_video(recorder.path), passed=False, session=args.session)
+                video = publish_video(
+                    artifacts.parent, shrink_video(recorder.path, start=clip.offset()), passed=False, session=args.session
+                )
             except Exception:
                 video = None
         try:
@@ -2696,8 +2722,9 @@ def main() -> int:
             "step": current_step, "error": str(error),
             "built": built, "total_seconds": metrics.total, "steps_seconds": metrics.steps,
             "results": results, "artifacts": str(artifacts),
-            **({"step_labels": labels_per_step} if recorder else {}),
+            **({"step_labels": shift_step_labels(labels_per_step, clip.offset())} if recorder else {}),
             **({"video": str(video)} if video else {}),
+            **({"video_from_seconds": round(clip.offset(), 2)} if video and clip.offset() else {}),
         }
         (artifacts / "metrics.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         payload, video, evidence_suffix = file_evidence(payload, video)

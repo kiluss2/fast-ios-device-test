@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.20.0 — 2026-11-25
+
+- `--record` on both engines: the clip starts after the flow's opening relaunch (the setup launch
+  and leading `launch` / `activate` / `terminate` steps) instead of showing the app being killed
+  and started again. `"clip_start": true` on a step starts it later; `setup.clip: "full"` keeps
+  the whole recording. `metrics.json` names the cut in `video_from_seconds`, and `step_labels`
+  times are on the cut clip's clock.
+- Simulator: step times in a recording count from simctl's "Recording started", not from
+  spawning it.
+
 ## 1.19.1 — 2026-11-23
 
 - Simulator: `press_button` `home` holds the press 0.3 s and launches SpringBoard beside it. On

@@ -1290,7 +1290,7 @@ class RunnerLogicTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             binary = Path(raw) / "checks"
             build = subprocess.run(
-                ["swiftc", "-parse-as-library", str(runner / "PromptRules.swift"), str(runner / "Settle.swift"), str(runner / "Trail.swift"), str(runner / "Gestures.swift"), str(runner / "Requests.swift"),
+                ["swiftc", "-parse-as-library", str(runner / "PromptRules.swift"), str(runner / "Settle.swift"), str(runner / "Trail.swift"), str(runner / "Gestures.swift"), str(runner / "Requests.swift"), str(runner / "ClipStart.swift"),
                  str(here / "runner_logic_checks.swift"), "-o", str(binary)],
                 capture_output=True, text=True,
             )

@@ -112,6 +112,10 @@ fastDeviceTest flow.json --device <d> --record --session pr-12
   17 s of a 1290×2796 recording goes from 20 MB to ~1.4 MB). A PASS keeps
   `<task>/final[-<session>].mp4` (one per task, older clips deleted), a FAIL keeps `run.mp4`
   in its run folder. The full-resolution original stays in `result.xcresult`.
+- The clip starts after the flow's opening relaunch (setup launch plus leading `launch` /
+  `activate` / `terminate` steps), not at XCTest's start: the runner reports `clip_start` in
+  device time and the host cuts against the recording attachment's timestamp. `clip_start` on
+  a step and `setup.clip: "full"` work as on the Simulator (usage.md, `--record`).
 - Without `--record` nothing is kept, a FAIL included: the runner reports a failed flow
   in its result file, so for XCTest the test passed.
 - Video inside the app keeps playing while XCTest records (checked on iOS 26.6 with an
