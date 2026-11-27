@@ -15,6 +15,7 @@ description: Use when asked to run, verify, re-test, or record an iOS screen or 
 | Watch the videos of a `--record` session | `fastUIReview` — read [references/review.md](references/review.md) first |
 | PR evidence (sheet + clips) | nothing to run: every PASS flow run, and every `--before` run that failed at its outcome step, is filed in `~/Desktop/<project> <ticket>/evidence/` — "Evidence folder" in [references/usage.md](references/usage.md) |
 | Change that sheet (order, captions, a shot) | edit `source/sheet.json` there, then `fastEvidenceSheet <it>` — "Evidence sheet" in [references/usage.md](references/usage.md) |
+| Which filed cases to retake before the PR, or drop a wrong one | `fastEvidenceSheet --stale <folder>` (code changed, last run failed) / `--drop <case>` — "Evidence folder" in [references/usage.md](references/usage.md) |
 | Physical iPhone | read [references/device.md](references/device.md) first |
 
 Never point both tools at one simulator: Xcode reinstalls the app over the fresh install.

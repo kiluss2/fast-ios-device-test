@@ -2543,12 +2543,14 @@ def main() -> int:
         filed, error = fast_evidence.after_run(
             spec, project_root, name, lambda: fast_evidence.simulator_name(udid),
             "before" if args.before else None, artifacts, video,
-            tidy=not (args.artifacts_root or args.artifacts),
+            tidy=not (args.artifacts_root or args.artifacts), flow=flow_path, engine="simulator",
         )
         if error:
             return {**payload, "evidence_error": error}, video, f" evidence_error={error}"
         if not filed:
             return payload, video, ""
+        if filed.get("stale"):
+            return payload, video, f" evidence_stale={filed['stale']} kept_from={filed.get('filed')}"
         payload = json.loads((artifacts / "metrics.json").read_text(encoding="utf-8"))
         video = Path(payload["video"]) if payload.get("video") else None
         return payload, video, f" evidence={file_link(filed['dir'])}"

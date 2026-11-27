@@ -447,5 +447,105 @@ class SheetFallbackTests(Base):
         self.assertEqual(sheet.build(spec)["cells"], 1)
 
 
+class StaleTests(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = repo(self.tmp)
+        (self.root / "Sources").mkdir()
+        (self.root / "Sources/App.swift").write_text("let a = 1\n")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "app")
+        self.flow = {**FLOW, "evidence": {"case": "P1"},
+                     "app": {"build_inputs": [str(self.root / "Sources")]}}
+        self.flow_path = self.tmp / "p1.json"
+
+    def file_flow(self, status: str, step: str = "") -> tuple[dict | None, str | None]:
+        run, video = make_run(self.root / "build/fast-ui/gating-off", status, step=step)
+        return evidence.after_run(self.flow, self.root, "gating-off", "iPhone 17", "after", run, video, True,
+                                  flow=self.flow_path, engine="device")
+
+    def stale(self) -> list[tuple[str, str]]:
+        folder = self.desktop / "MyApp PRJ-12"
+        return [(row["case"], row["state"]) for row in sheet.stale_cases(folder)]
+
+    def test_the_fingerprint_follows_content_not_commits(self) -> None:
+        inputs = [str(self.root / "Sources")]
+        first = evidence.code_fingerprint(self.root, inputs)
+        (self.root / "Sources/App.swift").write_text("let a = 2\n")
+        edited = evidence.code_fingerprint(self.root, inputs)
+        self.assertNotEqual(first, edited)
+        git(self.root, "commit", "-q", "-am", "edit")
+        self.assertEqual(evidence.code_fingerprint(self.root, inputs), edited)
+        (self.root / "Sources/New.swift").write_text("let b = 1\n")
+        self.assertNotEqual(evidence.code_fingerprint(self.root, inputs), edited)
+        (self.root / "Sources/New.swift").unlink()
+        (self.root / "README.md").write_text("docs\n")
+        self.assertEqual(evidence.code_fingerprint(self.root, inputs), edited)
+        (self.root / "Sources/App.swift").unlink()
+        self.assertNotEqual(evidence.code_fingerprint(self.root, inputs), edited)
+
+    def test_a_filed_case_records_its_code_and_flow(self) -> None:
+        filed, error = self.file_flow("pass")
+        self.assertIsNone(error)
+        runs = json.loads((filed["dir"] / "source/runs.json").read_text())
+        entry = runs["P1/after"]
+        self.assertEqual(entry["build"], evidence.code_fingerprint(self.root, [str(self.root / "Sources")]))
+        self.assertEqual((entry["flow"], entry["engine"], entry["device"]), (str(self.flow_path), "device", "iPhone 17"))
+        self.assertEqual(entry["shots"], ["P1/after/main"])
+        self.assertEqual(self.stale(), [("P1", "fresh")])
+
+    def test_a_code_change_makes_the_case_stale_and_names_the_rerun(self) -> None:
+        self.file_flow("pass")
+        (self.root / "Sources/App.swift").write_text("let a = 3\n")
+        rows = sheet.stale_cases(self.desktop / "MyApp PRJ-12")
+        self.assertEqual([(row["case"], row["state"], row["reason"]) for row in rows],
+                         [("P1", "stale", "code changed since it was filed")])
+        self.assertEqual(sheet.rerun_command(rows[0]["entry"]), f"fastDeviceTest {self.flow_path} --device 'iPhone 17'")
+
+    def test_a_failure_after_a_pass_marks_the_case_until_it_passes_again(self) -> None:
+        self.file_flow("pass")
+        marked, error = self.file_flow("fail", step="02_wait")
+        self.assertIsNone(error)
+        self.assertEqual(marked["stale"], "P1")
+        self.assertEqual(self.stale(), [("P1", "stale")])
+        self.assertTrue((self.desktop / "MyApp PRJ-12/source/shots/P1/after-main.jpg").exists())
+        self.file_flow("pass")
+        self.assertEqual(self.stale(), [("P1", "fresh")])
+
+    def test_a_failure_of_a_case_never_filed_marks_nothing(self) -> None:
+        marked, error = self.file_flow("fail", step="02_wait")
+        self.assertEqual((marked, error), (None, None))
+
+    def test_cells_filed_before_the_record_count_as_stale(self) -> None:
+        self.file_flow("pass")
+        folder = self.desktop / "MyApp PRJ-12"
+        (folder / "source/runs.json").unlink()
+        self.assertEqual(self.stale(), [("P1", "stale")])
+
+    def test_drop_deletes_the_case_and_a_later_pass_files_it_again(self) -> None:
+        self.file_flow("pass")
+        other = {**self.flow, "evidence": {"case": "P2"}}
+        run, video = make_run(self.root / "build/fast-ui/gating-off", "pass")
+        evidence.after_run(other, self.root, "gating-off", "iPhone 17", "after", run, video, True)
+        folder = self.desktop / "MyApp PRJ-12"
+        result = sheet.drop_cases(folder, ["P1"])
+        self.assertEqual((result["cases"], result["cells"]), (["P1"], 1))
+        self.assertFalse((folder / "source/shots/P1").exists())
+        self.assertFalse((folder / "evidence/P1.mp4").exists())
+        self.assertTrue((folder / "evidence/P2.mp4").exists())
+        cells = json.loads((folder / "source/sheet.json").read_text())["cells"]
+        self.assertEqual([cell["key"] for cell in cells], ["P2/after/main"])
+        self.assertNotIn("P1/after", json.loads((folder / "source/runs.json").read_text()))
+        self.file_flow("pass")
+        cells = json.loads((folder / "source/sheet.json").read_text())["cells"]
+        self.assertEqual(sorted(cell["key"] for cell in cells), ["P1/after/main", "P2/after/main"])
+
+    def test_dropping_the_last_case_removes_the_sheet_image(self) -> None:
+        self.file_flow("pass")
+        folder = self.desktop / "MyApp PRJ-12"
+        sheet.drop_cases(folder, ["P1"])
+        self.assertFalse((folder / "evidence/PRJ-12.jpg").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

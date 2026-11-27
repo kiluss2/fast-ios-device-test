@@ -28,6 +28,18 @@ Every cell is checked before anything is drawn, so one run reports every missing
 
 prints the evidence folder flow runs of that checkout are filed into, and creates its
 `source/flows/`, where the ticket's flows are kept.
+
+    fastEvidenceSheet --stale <evidence folder | project root>
+
+lists every filed case whose pictures no longer prove the code: the code under its flow's
+`build_inputs` changed since it was filed, its last run failed, or it was filed before the tool
+recorded the code (1.21.0). Each STALE line carries the command that retakes it. Exit 1 when
+any case is stale.
+
+    fastEvidenceSheet --drop <case> [<case> ...] [--folder <project root> | <evidence folder>]
+
+deletes a case's shots, clips, cells and record (a wrong test, an obsolete case) and builds the
+sheets again; a later passing run of that case files it afresh.
 """
 
 from __future__ import annotations
@@ -35,6 +47,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shlex
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -264,6 +278,123 @@ def print_folder(project_root: Path) -> int:
     return 0
 
 
+def evidence_folder(target: Path) -> Path | None:
+    """The evidence folder itself, or the one of the checkout `target` is in."""
+    if target.is_file():
+        target = target.parent
+    if (target / "source").is_dir() or (target / "evidence").is_dir():
+        return target
+    if target.name == "source" and target.is_dir():
+        return target.parent
+    import fast_evidence
+
+    named = fast_evidence.folder_for(target, {})
+    return named[0] if named else None
+
+
+def sheet_specs(folder: Path) -> list[Path]:
+    return sorted((folder / "source").glob("sheet*.json"))
+
+
+def rerun_command(entry: dict[str, Any]) -> str:
+    flow = entry.get("flow")
+    if not flow:
+        return ""
+    if entry.get("engine") == "device":
+        return f"fastDeviceTest {shlex.quote(flow)} --device {shlex.quote(str(entry.get('device', '')))}"
+    return f"fastSimulatorTest {shlex.quote(flow)}"
+
+
+def stale_cases(folder: Path) -> list[dict[str, Any]]:
+    """One row per filed case and role: case, role, state (fresh/stale), reason, entry."""
+    import fast_evidence
+
+    runs = fast_evidence.read_runs(folder)
+    rows: list[dict[str, Any]] = []
+    prints: dict[tuple[str, tuple[str, ...]], str | None] = {}
+    for key, entry in sorted(runs.items()):
+        case, _, role = key.rpartition("/")
+        reason = ""
+        failed = entry.get("failed")
+        if failed:
+            reason = f"last run failed at {failed.get('step') or '?'} ({failed.get('at')})"
+        elif entry.get("build") and entry.get("project_root"):
+            lookup = (entry["project_root"], tuple(entry.get("inputs") or []))
+            if lookup not in prints:
+                prints[lookup] = fast_evidence.code_fingerprint(Path(lookup[0]), list(lookup[1]))
+            if prints[lookup] != entry["build"]:
+                reason = "code changed since it was filed"
+        rows.append({"case": case, "role": role, "state": "stale" if reason else "fresh", "reason": reason, "entry": entry})
+    known = {f"{row['case']}/{row['role']}" for row in rows}
+    for spec_path in sheet_specs(folder):
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        for cell in spec.get("cells") or []:
+            parts = str(cell.get("key", "")).split("/")
+            if len(parts) >= 2 and f"{parts[0]}/{parts[1]}" not in known:
+                known.add(f"{parts[0]}/{parts[1]}")
+                rows.append({"case": parts[0], "role": parts[1], "state": "stale",
+                             "reason": "filed before the tool recorded the code", "entry": {}})
+    return rows
+
+
+def print_stale(target: Path) -> int:
+    folder = evidence_folder(target)
+    if folder is None or not folder.is_dir():
+        print(f"FAIL error=no evidence folder for {target}", file=sys.stderr)
+        return 1
+    rows = stale_cases(folder)
+    stale = [row for row in rows if row["state"] == "stale"]
+    for row in rows:
+        entry = row["entry"]
+        line = f"{row['state'].upper()} case={row['case']} role={row['role']} filed={entry.get('filed', '?')}"
+        if row["reason"]:
+            line += f" reason={json.dumps(row['reason'])}"
+        command = rerun_command(entry) if row["state"] == "stale" else ""
+        if command:
+            line += f" rerun={json.dumps(command + (' --before' if row['role'] == 'before' else ''))}"
+        print(line)
+    print(f"{'STALE' if stale else 'FRESH'} cases={len(rows)} stale={len(stale)} folder={folder.as_uri()}")
+    return 1 if stale else 0
+
+
+def drop_cases(folder: Path, cases: list[str]) -> dict[str, Any]:
+    import fast_evidence
+
+    wanted = {fast_evidence.safe(case) for case in cases}
+    removed_files: list[str] = []
+    with fast_evidence.folder_lock(folder):
+        for case in wanted:
+            shots = folder / "source/shots" / case
+            if shots.is_dir():
+                removed_files += [str(path) for path in shots.iterdir()]
+                shutil.rmtree(shots)
+            for clip in (folder / fast_evidence.EVIDENCE_DIR).glob(f"{case}*"):
+                if clip.suffix != ".jpg" and clip.stem in (case, f"{case}-before"):
+                    removed_files.append(str(clip))
+                    clip.unlink()
+        runs = fast_evidence.read_runs(folder)
+        kept = {key: entry for key, entry in runs.items() if key.rpartition("/")[0] not in wanted}
+        if kept != runs:
+            fast_evidence.write_runs(folder, kept)
+        sheets = []
+        cells_removed = 0
+        for spec_path in sheet_specs(folder):
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            cells = spec.get("cells") or []
+            left = [cell for cell in cells if str(cell.get("key", "")).split("/")[0] not in wanted]
+            if len(left) == len(cells):
+                continue
+            cells_removed += len(cells) - len(left)
+            spec["cells"] = left
+            spec_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            out = resolve(spec.get("out") or f"{spec_path.stem}.jpg", spec_path.parent)
+            if left:
+                sheets.append(build(spec_path)["path"])
+            elif out.exists():
+                out.unlink()
+    return {"cases": sorted(wanted), "files": len(removed_files), "cells": cells_removed, "sheets": sheets}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="fastEvidenceSheet", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -274,7 +405,34 @@ def main() -> int:
         help="Print (and create) the evidence folder of this checkout's ticket and its source/flows/, "
         "where the ticket's flows are kept",
     )
+    parser.add_argument(
+        "--stale", type=Path, metavar="FOLDER",
+        help="List the filed cases to retake (code changed, last run failed, or no record) in this "
+        "evidence folder, or in the one of this checkout",
+    )
+    parser.add_argument(
+        "--drop", nargs="+", metavar="CASE",
+        help="Delete these cases' shots, clips, cells and record from the evidence folder (the spec "
+        "argument, or --folder's checkout, else the working directory's)",
+    )
     args = parser.parse_args()
+    if args.stale:
+        return print_stale(args.stale.expanduser().resolve())
+    if args.drop:
+        target = (args.spec or args.folder or Path.cwd()).expanduser().resolve()
+        folder = evidence_folder(target)
+        if folder is None or not (folder / "source").is_dir():
+            print(f"FAIL error=no evidence folder for {target}", file=sys.stderr)
+            return 1
+        try:
+            result = drop_cases(folder, args.drop)
+        except (SheetError, OSError, json.JSONDecodeError) as error:
+            print(f"FAIL error={error}", file=sys.stderr)
+            return 1
+        sheets = " ".join(Path(path).resolve().as_uri() for path in result["sheets"])
+        print(f"DROPPED cases={','.join(result['cases'])} files={result['files']} cells={result['cells']}"
+              f"{f' sheets={sheets}' if sheets else ''}")
+        return 0
     if args.folder:
         return print_folder(args.folder.expanduser().resolve())
     if not args.spec:

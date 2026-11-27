@@ -997,12 +997,14 @@ def run_flow(args: argparse.Namespace) -> int:
     # A run in a root the caller chose (--artifacts-root, FAST_DEVICE_ROOT) is copied from, never emptied.
     filed, evidence_error = fast_evidence.after_run(
         spec, project_root, name, device["name"], "before" if args.before else None, artifacts, video,
-        tidy=args.artifacts_root is None,
+        tidy=args.artifacts_root is None, flow=flow_path, engine="device",
     )
     evidence_suffix = ""
     if evidence_error:
         report["evidence_error"] = evidence_error
         evidence_suffix = f" evidence_error={evidence_error}"
+    elif filed and filed.get("stale"):
+        evidence_suffix = f" evidence_stale={filed['stale']} kept_from={filed.get('filed')}"
     elif filed:
         report = json.loads((artifacts / "metrics.json").read_text())
         video = Path(report["video"]) if report.get("video") else None

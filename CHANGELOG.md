@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.21.0 — 2026-11-27
+
+- Evidence: every filed case records a fingerprint of the code it ran (the content of the
+  flow's `app.build_inputs`), its flow and engine, in `source/runs.json`.
+- `fastEvidenceSheet --stale <folder>` lists the cases to retake before a PR (code changed since
+  filing, last run failed, or no record) with the rerun command; exit 1 when any is stale.
+- A failing run of a case with filed evidence ends with `evidence_stale=<case>` and marks the
+  case, instead of leaving the old pictures silently in the sheet.
+- `fastEvidenceSheet --drop <case>` deletes a case's shots, clips, cells and record and rebuilds
+  the sheets; a later passing run files it again.
+
 ## 1.20.0 — 2026-11-25
 
 - `--record` on both engines: the clip starts after the flow's opening relaunch (the setup launch

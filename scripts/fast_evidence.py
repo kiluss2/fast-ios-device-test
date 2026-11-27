@@ -14,6 +14,12 @@ not the bug.
         <case>.mp4, <case>-before.mp4
       source/sheet.json            fastEvidenceSheet spec; edit it and render again
       source/shots/<case>/<role>-<shot>.jpg   720 px wide, JPEG 80
+      source/runs.json             per case and role: the code it was filed from, when, which flow
+
+Each filed run records a fingerprint of the code it ran (the content of the flow's
+`app.build_inputs`, else of the whole checkout; commits that keep the content keep it), so
+`fastEvidenceSheet --stale <folder>` can name the cases to retake. A failing run of a case that
+has filed evidence marks that case too: its old pictures no longer prove the code.
 
 The ticket comes from the flow's `evidence.ticket`, FAST_EVIDENCE_TICKET, or the ticket keys
 in the git branch of `project_root`; a folder outside git with none of those files nothing.
@@ -24,6 +30,7 @@ points at the filed clip. FAST_EVIDENCE=0 or `"evidence": false` turns filing of
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -31,7 +38,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -110,6 +117,81 @@ def folder_for(project_root: Path, evidence: dict[str, Any]) -> tuple[Path, str,
     project = project_name(project_root, evidence)
     root = Path(os.environ.get("FAST_EVIDENCE_DIR") or Path.home() / "Desktop").expanduser()
     return root / folder_safe(f"{project} {ticket}"), project, ticket
+
+
+RUNS_FILE = "runs.json"
+
+
+def git_bytes(root: Path, *args: str, stdin: bytes | None = None) -> bytes | None:
+    try:
+        done = subprocess.run(["git", "-C", str(root), *args], input=stdin, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def code_fingerprint(project_root: Path, inputs: list[str]) -> str | None:
+    """A hash of the content of `inputs` (paths in the checkout, else the whole checkout) as it is
+    on disk now: blob ids of tracked files, worktree edits and untracked files included, ignored
+    files left out. None outside git."""
+    top = git(project_root, "rev-parse", "--show-toplevel")
+    if not top:
+        return None
+    specs = [str(Path(path)) for path in inputs] or ["."]
+    listed = git_bytes(Path(top), "ls-files", "-s", "-z", "--", *specs)
+    changed = git_bytes(Path(top), "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", *specs)
+    if listed is None or changed is None:
+        return None
+    blobs: dict[str, str] = {}
+    for entry in listed.split(b"\0"):
+        if b"\t" in entry:
+            meta, path = entry.split(b"\t", 1)
+            blobs[path.decode("utf-8", "surrogateescape")] = meta.split()[1].decode()
+    dirty = []
+    for entry in changed.split(b"\0"):
+        if len(entry) > 3:
+            path = entry[3:].decode("utf-8", "surrogateescape")
+            if (Path(top) / path).is_file():
+                dirty.append(path)
+            else:
+                blobs.pop(path, None)
+    if dirty:
+        hashed = git_bytes(Path(top), "hash-object", "--stdin-paths", stdin="\n".join(dirty).encode("utf-8", "surrogateescape"))
+        if hashed is None:
+            return None
+        blobs.update(zip(dirty, hashed.decode().split()))
+    digest = hashlib.sha1()
+    for path in sorted(blobs):
+        digest.update(f"{path}\0{blobs[path]}\n".encode("utf-8", "surrogateescape"))
+    return digest.hexdigest()[:16]
+
+
+def build_inputs(spec: dict[str, Any], project_root: Path, flow: Path | None) -> list[str]:
+    base = flow.parent if flow else project_root
+    return [str((base / Path(path).expanduser()).resolve()) for path in (spec.get("app") or {}).get("build_inputs") or []]
+
+
+def case_name(evidence: dict[str, Any], task: str, device: str) -> str:
+    return safe(str(evidence.get("case") or f"{task}-{device}"))
+
+
+def read_runs(folder: Path) -> dict[str, Any]:
+    path = folder / "source" / RUNS_FILE
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_runs(folder: Path, runs: dict[str, Any]) -> None:
+    path = folder / "source" / RUNS_FILE
+    partial = path.with_name(f".{path.name}.partial")
+    partial.write_text(json.dumps(runs, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(partial, path)
+
+
+def now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def outcome_step(actions: list[dict[str, Any]]) -> int:
@@ -214,14 +296,14 @@ def merge_cells(cells: list[dict[str, Any]], removed: list[str], new_cells: list
 
 def file_run(
     spec: dict[str, Any], evidence: dict[str, Any], folder: Path, title: str, ticket: str, task: str,
-    device: str, role: str, status: str, artifacts: Path, video: Path | None,
+    device: str, role: str, status: str, artifacts: Path, video: Path | None, run_info: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     before = role == "before"
     shots = shot_files(spec.get("actions") or [], artifacts, list(evidence.get("shots") or []), status != "pass")
     clip = video if video and video.is_file() else None
     if not shots and not clip:
         return None
-    case = safe(str(evidence.get("case") or f"{task}-{device}"))
+    case = case_name(evidence, task, device)
     label = str(evidence.get("label") or f"{task} · {device}") + (" · before" if before else "")
     caption = str(evidence.get("before_caption") or "") if before else str(evidence.get("caption") or spec.get("expect") or "")
     sheet_name = str(evidence.get("sheet") or "")
@@ -240,6 +322,13 @@ def file_run(
         if clip:
             filed_clip = folder / EVIDENCE_DIR / f"{case}{'-before' if before else ''}{clip.suffix or '.mp4'}"
             store_clip(clip, filed_clip)
+        runs = read_runs(folder)
+        runs[f"{case}/{role}"] = {
+            "filed": now(), "task": task, "device": device, "sheet": sheet_name or None,
+            "shots": [f"{case}/{role}/{stem}" for stem in stored], "clip": filed_clip.name if filed_clip else None,
+            **(run_info or {}),
+        }
+        write_runs(folder, runs)
         if cells:
             spec_path = folder / "source" / (f"sheet-{safe(sheet_name)}.json" if sheet_name else "sheet.json")
             sheet = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.exists() else {}
@@ -271,9 +360,11 @@ def tidy_run(artifacts: Path, video: Path | None) -> None:
 def after_run(
     spec: dict[str, Any], project_root: Path, task: str, device: str | Callable[[], str],
     role: str | None, artifacts: Path, video: Path | None, tidy: bool,
+    flow: Path | None = None, engine: str = "",
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """File the run if it counts; returns (what was filed, None) or (None, the error). A filing
-    problem never changes the run's own result."""
+    """File the run if it counts; returns (what was filed, None) or (None, the error). A failing
+    run of a case with filed evidence returns ({"dir", "stale", "filed"}, None) and marks the case
+    in runs.json. A filing problem never changes the run's own result."""
     evidence = settings(spec)
     if evidence is None:
         return None, None
@@ -282,15 +373,26 @@ def after_run(
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         status = str(metrics.get("status", ""))
         role = "before" if (role or evidence.get("role")) == "before" else "after"
-        if not should_file(status, role, str(metrics.get("step", "")), spec.get("actions") or []):
+        step = str(metrics.get("step", ""))
+        filing = should_file(status, role, step, spec.get("actions") or [])
+        if not filing and (status == "pass" or role != "after"):
             return None, None
         named = folder_for(project_root, evidence)
         if named is None:
             return None, None
         folder, project, ticket = named
+        device_name = device() if callable(device) else device
+        inputs = build_inputs(spec, project_root, flow)
+        build = code_fingerprint(project_root, inputs)
+        if not filing:
+            return mark_failed(folder, case_name(evidence, task, device_name), step, build), None
+        run_info = {
+            "build": build, "project_root": str(project_root), "inputs": inputs,
+            "flow": str(flow) if flow else None, "engine": engine or None,
+        }
         filed = file_run(
-            spec, evidence, folder, f"{project} · {ticket}", ticket, task, device() if callable(device) else device,
-            role, status, artifacts, video,
+            spec, evidence, folder, f"{project} · {ticket}", ticket, task, device_name,
+            role, status, artifacts, video, run_info,
         )
         if filed is None:
             return None, None
@@ -308,6 +410,21 @@ def after_run(
         return filed, None
     except Exception as error:  # noqa: BLE001 - evidence is a by-product, the run's result stands
         return None, f"{type(error).__name__}: {error}"
+
+
+def mark_failed(folder: Path, case: str, step: str, build: str | None) -> dict[str, Any] | None:
+    """A failing run of a case whose evidence is filed: its pictures were taken from code that no
+    longer passes, so the case is marked until a passing run files it again."""
+    if not (folder / "source" / RUNS_FILE).exists():
+        return None
+    with folder_lock(folder):
+        runs = read_runs(folder)
+        entry = runs.get(f"{case}/after")
+        if entry is None:
+            return None
+        entry["failed"] = {"at": now(), "step": step, "build": build}
+        write_runs(folder, runs)
+    return {"dir": folder, "stale": case, "filed": entry.get("filed")}
 
 
 def simulator_name(udid: str) -> str:

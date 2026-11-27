@@ -544,6 +544,7 @@ outcome step. Nothing else is filed: `do`, `--build-only`, other failures.
     <case>.mp4, <case>-before.mp4      the run's clip (--record), already 960 px
   source/sheet.json                    fastEvidenceSheet spec: edit, then render again
   source/shots/<case>/<role>-<shot>.jpg   720 px, JPEG 80, ~50–150 KB
+  source/runs.json                     per case: the code it was filed from, when, its flow
 ```
 
 - **Ticket**: the flow's `evidence.ticket`, else `FAST_EVIDENCE_TICKET`, else the upper-case
@@ -572,7 +573,19 @@ outcome step. Nothing else is filed: `do`, `--build-only`, other failures.
 ```
 
 - The PASS/FAIL line ends with `evidence=file://…` when the run was filed, or
-  `evidence_error=…` when filing failed; the run's own result never changes.
+  `evidence_error=…` when filing failed; the run's own result never changes. A failing run of
+  a case that already has filed evidence ends with `evidence_stale=<case> kept_from=<time>`:
+  the old pictures stay, but the case is marked until a passing run files it again.
+- **Stale cases**: each filed case records a fingerprint of the code it ran (the content of
+  `app.build_inputs`, worktree edits and untracked files included; a commit of the same content
+  keeps it). `fastEvidenceSheet --stale <evidence folder | project_root>` prints one
+  `FRESH`/`STALE` line per case (reason: code changed, last run failed, or filed before 1.21.0)
+  with the `rerun=` command, and exits 1 when any case is stale. Run it before the PR and retake
+  only those; never rerun every flow for the sheet.
+- **Dropping a case** (a wrong test, an obsolete case): `fastEvidenceSheet --drop <case> …
+  --folder <project_root>` (or the evidence folder as the argument) deletes its shots, clips,
+  cells and record and builds the sheets again. A later passing run files it afresh; `"removed"`
+  is for a cell that must never come back.
 - A filed PASS run in the default root (`fast-ui`, `fast-device` under the artifacts home) keeps only
   `metrics.json`, its `video` pointing at the filed clip, so `fastUIReport`, `fastUIReview` and
   `fastEvidenceSheet` `task` cells still work. A root set with `--artifacts-root`,
